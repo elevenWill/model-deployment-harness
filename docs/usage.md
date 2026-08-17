@@ -147,6 +147,7 @@ python scripts/probe_host.py \
   --host-id minimax-test-host \
   --username deploy \
   --port 22 \
+  --deployment-id minimax-h3-test-001 \
   --output host-profile.json
 ```
 
@@ -243,7 +244,23 @@ python scripts/verify_service.py \
 
 只有 L5 真实推理和 L6 媒体/语义验证都通过时，结果才会是 `VERIFIED`。
 
-## 8. 查询与知识记录
+## 8. 自动沉淀与查询
+
+正常使用上述命令时，工具会自动把过程记录到项目内，不需要再手工抄写日志：
+
+```text
+deployments/<deployment-id>/archive.json       # 全过程时间线与制品哈希
+deployments/<deployment-id>/execution-NNNN.json # 每步起止时间、退出码、脱敏输出
+deployments/<deployment-id>.json               # 当前已知部署记录
+knowledge/incidents/incident-*.json             # 执行失败自动创建
+knowledge/benchmarks/benchmark-*.json           # 仅完整验证通过后创建
+```
+
+需求创建/合并、带 `--deployment-id` 的只读主机检查、审核计划执行、真实推理和最终验证都会自动追加到同一时间线。执行前，执行器会先重新校验计划，再收录需求、主机观测、研究、计划和审核制品；未通过审核的内容不会被标记为 `PASS`。输出会截断并过滤 `.env`/环境变量中的密钥，密码、令牌和私钥禁止进入任何持久化制品。
+
+`Lesson` 和 `DecisionRecord` 不会由工具猜测生成。只有你或审核流程提供了明确结论及证据引用时，才应登记为经验或决策；这样知识库不会把一次偶发现象误写成规律。
+
+这些运行时档案可能包含主机信息或大文件引用，默认已被 `.gitignore` 排除，不会随代码提交。需要长期备份时，请把 `deployments/` 与自动生成的 `knowledge/incidents/`、`knowledge/benchmarks/` 交给受控备份系统，并沿用同样的访问权限与密钥禁入规则。
 
 读取已登记信息：
 

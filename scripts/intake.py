@@ -22,6 +22,7 @@ try:
         load_document,
         validate_instance,
     )
+    from scripts.deployment_archive import DeploymentArchive
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from _common import (  # type: ignore[no-redef]
         ROOT,
@@ -31,6 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         load_document,
         validate_instance,
     )
+    from deployment_archive import DeploymentArchive  # type: ignore[no-redef]
 
 
 HOST_SELECTORS = ("host_id", "hostname", "address", "alias")
@@ -360,10 +362,16 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--draft-id", required=True)
     create.add_argument("--update", required=True, type=Path)
     create.add_argument("--output", required=True, type=Path)
+    create.add_argument(
+        "--archive-root", type=Path, default=ROOT / "deployments", help="部署归档根目录"
+    )
     merge = subparsers.add_parser("merge", help="把本轮新增信息合并进已有草稿")
     merge.add_argument("--draft", required=True, type=Path)
     merge.add_argument("--update", required=True, type=Path)
     merge.add_argument("--output", type=Path)
+    merge.add_argument(
+        "--archive-root", type=Path, default=ROOT / "deployments", help="部署归档根目录"
+    )
     status = subparsers.add_parser("status", help="显示已记住、可推进和仍缺少的内容")
     status.add_argument("--draft", required=True, type=Path)
     status.add_argument("--json", action="store_true")
@@ -375,12 +383,25 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "create":
             draft = create_draft(args.draft_id, load_document(args.update))
-            atomic_write_json(args.output, draft)
+            output = args.output
+            atomic_write_json(output, draft)
         elif args.command == "merge":
             draft = merge_draft(load_document(args.draft), load_document(args.update))
-            atomic_write_json(args.output or args.draft, draft)
+            output = args.output or args.draft
+            atomic_write_json(output, draft)
         else:
             draft = load_document(args.draft)
+        if args.command in {"create", "merge"}:
+            readiness = evaluate_draft(draft)
+            DeploymentArchive(draft["draft_id"], root=args.archive_root).record(
+                stage="INTAKE",
+                status="DRAFT",
+                summary=(
+                    "已创建需求草稿" if args.command == "create" else "已合并本轮新增需求"
+                ),
+                artifacts=(output,),
+                details={"readiness": readiness.as_dict()},
+            )
         if args.command == "status" and args.json:
             result = {
                 "readiness": evaluate_draft(draft).as_dict(),

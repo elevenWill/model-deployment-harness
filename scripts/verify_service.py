@@ -4,6 +4,7 @@ import argparse
 import json
 import shutil
 import subprocess
+from contextlib import suppress
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -20,6 +21,7 @@ try:
         load_document,
         validate_instance,
     )
+    from scripts.deployment_archive import DeploymentArchive
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from _common import (  # type: ignore[no-redef]
         ROOT,
@@ -30,6 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         load_document,
         validate_instance,
     )
+    from deployment_archive import DeploymentArchive  # type: ignore[no-redef]
 
 LEVELS = (
     "L1_environment",
@@ -322,9 +325,12 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    archive: DeploymentArchive | None = None
+    plan: dict[str, Any] | None = None
     try:
         plan = load_document(args.plan)
         validate_instance(plan, "deployment-plan.schema.json")
+        archive = DeploymentArchive(plan["deployment_id"])
         expected_recipe = (ROOT / plan["verification"]["recipe_ref"]).resolve()
         if not expected_recipe.is_relative_to((ROOT / "models").resolve()):
             raise HarnessError("已审核验证配方越出了 models 目录")
@@ -339,9 +345,91 @@ def main(argv: list[str] | None = None) -> int:
             args.semantic_review,
         )
         atomic_write_json(args.output, result)
+        artifact_paths = [
+            args.plan,
+            args.observations,
+            args.recipe,
+            args.output,
+            *(Path(item["path"]) for item in result["artifacts"]),
+        ]
+        archive.record(
+            stage="VERIFY",
+            status=(
+                "VERIFIED"
+                if result["overall_status"] == "VERIFIED"
+                else "FAILED"
+                if result["overall_status"] == "FAILED"
+                else "INCOMPLETE"
+            ),
+            summary=(
+                "L1 至 L6 验证通过，部署已确认可用"
+                if result["overall_status"] == "VERIFIED"
+                else "验证未完全通过，已保留证据供排查"
+            ),
+            host_id=str(plan["target"]["host_id"]),
+            artifacts=list(dict.fromkeys(artifact_paths)),
+            details={
+                "verification_ref": str(args.output),
+                "workload": {"recipe_ref": plan["verification"]["recipe_ref"]},
+                "environment": {
+                    "framework": plan["framework"]["name"],
+                    "framework_version": plan["framework"]["version"],
+                    "gpu_topology": result["gpu_topology_summary"] or "未记录",
+                },
+                "metrics": result["metrics"],
+                "deployment": {
+                    "request_ref": f"request:{plan['request_id']}",
+                    "plan_ref": f"sha256:{plan['review']['plan_sha256']}",
+                    "model": {
+                        "id": plan["model"]["id"],
+                        "variant": plan["model"]["variant"],
+                        "path": plan["target"]["model_root"],
+                    },
+                    "framework": {
+                        "name": plan["framework"]["name"],
+                        "version": plan["framework"]["version"],
+                    },
+                    "target": {
+                        "gpu_ids": list(plan["target"]["gpu_ids"]),
+                        "install_root": plan["target"]["install_root"],
+                        "bind_host": plan["service"]["bind_host"],
+                        "port": plan["service"]["port"],
+                    },
+                },
+            },
+        )
         print(f"{result['overall_status']}: {args.output}")
         return 0 if result["overall_status"] == "VERIFIED" else 3
     except (HarnessError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        if archive is not None and plan is not None:
+            target = plan.get("target")
+            host_id = (
+                str(target["host_id"])
+                if isinstance(target, dict) and target.get("host_id")
+                else None
+            )
+            artifacts = tuple(
+                path
+                for path in (
+                    args.plan,
+                    args.observations,
+                    args.recipe,
+                    args.media,
+                    args.inference_proof,
+                    args.semantic_review,
+                    args.output,
+                )
+                if path is not None and path.is_file()
+            )
+            with suppress(HarnessError, OSError):
+                archive.record(
+                    stage="VERIFY",
+                    status="BLOCKED",
+                    summary="验证未能完成，已保留现有证据",
+                    host_id=host_id,
+                    artifacts=artifacts,
+                    details={"error_type": exc.__class__.__name__},
+                )
         print(f"BLOCKED: {exc}")
         return 2
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from scripts._common import HarnessError, validate_instance
 from scripts.intake import (
     create_draft,
     evaluate_draft,
+    main,
     materialize_request,
     merge_draft,
     summarize_draft,
@@ -217,3 +220,34 @@ def test_modelscope_is_pending_adaptation_not_user_input() -> None:
         # Guard against a future summary implementation accidentally asking again.
         item for item in readiness.request_missing
     ]
+
+
+def test_intake_cli_automatically_appends_to_deployment_archive(tmp_path) -> None:
+    update = tmp_path / "update.json"
+    update.write_text(
+        '{"target":{"host":{"address":"192.168.121.30","ssh_port":22}}}',
+        encoding="utf-8",
+    )
+    draft = tmp_path / "draft.json"
+    archive_root = tmp_path / "deployments"
+
+    assert main(
+        [
+            "create",
+            "--draft-id",
+            "dep-intake",
+            "--update",
+            str(update),
+            "--output",
+            str(draft),
+            "--archive-root",
+            str(archive_root),
+        ]
+    ) == 0
+
+    archive = json.loads(
+        (archive_root / "dep-intake" / "archive.json").read_text(encoding="utf-8")
+    )
+    assert archive["events"][0]["stage"] == "INTAKE"
+    assert archive["events"][0]["status"] == "DRAFT"
+    assert archive["events"][0]["artifacts"][0]["path"] == str(draft)

@@ -133,6 +133,16 @@ registry:
   live_query_requires_fresh_probe_when_reachable: true
   keep_known_and_observed_separate: true
 
+knowledge_capture:
+  archive_path: deployments/<deployment-id>/archive.json
+  automatic_stages: [INTAKE, REQUIREMENT_GATE, HOST_DISCOVERY, RESEARCH, PLAN, PLAN_REVIEW, EXECUTE, INFERENCE, VERIFY, RECORD]
+  execution_step_timestamps: required
+  execution_output: redacted_and_bounded
+  incident_on_execution_failure: true
+  benchmark_requires: VERIFIED
+  lesson_and_decision_require_evidence: true
+  secrets_forbidden: true
+
 secrets:
   allowed_sources: [environment, dotenv_untracked]
   forbidden_destinations: [command_arguments, logs, registry, plans, deployment_records, git]

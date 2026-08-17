@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from scripts._common import ROOT, canonical_plan_sha256, file_sha256
+from scripts.deployment_archive import DeploymentArchive
 from scripts.probe_host import CommandResult
-from scripts.remote_exec import ExecutionBlocked, execute_plan, validate_executable_plan
+from scripts.remote_exec import (
+    ExecutionBlocked,
+    archive_reviewed_lifecycle,
+    execute_plan,
+    validate_executable_plan,
+)
 
 
 def ready_plan():
@@ -285,6 +293,106 @@ def test_ready_hash_validated_and_exact_argv_executed(tmp_path):
         tuple(plan["steps"][0]["command"]),
         ("rmdir", "/tmp/model-deployment-harness-writer-lock"),
     ]
+
+
+def test_execute_plan_automatically_records_redacted_step_results(tmp_path):
+    plan = ready_plan()
+    archive = DeploymentArchive(
+        plan["deployment_id"],
+        root=tmp_path / "deployments",
+        knowledge_root=tmp_path / "knowledge",
+    )
+    result = execute_plan(
+        plan,
+        FakeTransport(),
+        request=deployment_request(),
+        host_profile=observed_host(),
+        lock_directory=tmp_path,
+        _probe_collector=lambda _: observed_host(),
+        archive=archive,
+    )
+
+    assert result.status == "EXECUTED"
+    execution = archive.directory / "execution-0001.json"
+    assert execution.is_file()
+    document = json.loads(execution.read_text(encoding="utf-8"))
+    assert document["steps"] == [
+        {
+            "step_id": "mkdir-install",
+            "started_at": document["steps"][0]["started_at"],
+            "completed_at": document["steps"][0]["completed_at"],
+            "returncode": 0,
+            "stdout_redacted": "ok",
+            "stderr_redacted": "",
+        }
+    ]
+    assert document["steps"][0]["started_at"] <= document["steps"][0]["completed_at"]
+    deployment_record_path = tmp_path / "deployments" / "dep-1.json"
+    deployment_record = json.loads(
+        deployment_record_path.read_text(encoding="utf-8")
+    )
+    assert deployment_record["deployment_status"] == "STARTED"
+    assert deployment_record["known_state"]["expected_service_state"] == "RUNNING"
+    assert deployment_record["framework"]["name"] == "sglang"
+
+
+def test_preflight_exception_is_automatically_recorded_as_failed_deployment(tmp_path):
+    plan = ready_plan()
+    archive = DeploymentArchive(
+        plan["deployment_id"],
+        root=tmp_path / "deployments",
+        knowledge_root=tmp_path / "knowledge",
+    )
+    request = deployment_request()
+    request["target"]["gpu_ids"] = [1]
+    with pytest.raises(ExecutionBlocked, match="制品不匹配"):
+        execute_plan(
+            plan,
+            FakeTransport(),
+            request=request,
+            host_profile=observed_host(),
+            lock_directory=tmp_path,
+            _probe_collector=lambda _: observed_host(),
+            archive=archive,
+        )
+
+    record = json.loads(
+        (tmp_path / "deployments" / "dep-1.json").read_text(encoding="utf-8")
+    )
+    assert record["deployment_status"] == "FAILED"
+    assert record["incident_refs"] == ["incident-dep-1-0001"]
+
+
+def test_reviewed_plan_archives_all_prior_lifecycle_artifacts(tmp_path):
+    plan = ready_plan()
+    request_path = tmp_path / "request.json"
+    profile_path = tmp_path / "host-profile.json"
+    plan_path = tmp_path / "plan.json"
+    request_path.write_text(json.dumps(deployment_request()), encoding="utf-8")
+    profile_path.write_text(json.dumps(observed_host()), encoding="utf-8")
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    archive = DeploymentArchive(plan["deployment_id"], root=tmp_path / "deployments")
+
+    archive_reviewed_lifecycle(
+        archive,
+        plan,
+        request_path=request_path,
+        host_profile_path=profile_path,
+        plan_path=plan_path,
+    )
+
+    document = json.loads(archive.path.read_text(encoding="utf-8"))
+    assert [event["stage"] for event in document["events"]] == [
+        "INTAKE",
+        "REQUIREMENT_GATE",
+        "HOST_DISCOVERY",
+        "RESEARCH",
+        "PLAN",
+        "PLAN_REVIEW",
+    ]
+    assert all(event["status"] == "PASS" for event in document["events"])
+    review_paths = {item["path"] for item in document["events"][-1]["artifacts"]}
+    assert str(plan_path) in review_paths
 
 
 def test_hash_detects_any_post_review_change():

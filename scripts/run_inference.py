@@ -24,6 +24,7 @@ from scripts._common import (
     load_document,
     validate_instance,
 )
+from scripts.deployment_archive import DeploymentArchive
 
 OpenUrl = Callable[..., Any]
 
@@ -74,7 +75,7 @@ def _atomic_write_bytes(path: Path, value: bytes) -> None:
         raise
 
 
-def run_inference(
+def _run_inference_unrecorded(
     plan: dict[str, Any], recipe: dict[str, Any], endpoint: str, payload_path: Path,
     output_path: Path, response_path: Path, proof_path: Path, *, timeout: float = 1800,
     poll_interval: float = 2, opener: OpenUrl = urllib.request.urlopen,
@@ -171,6 +172,70 @@ def run_inference(
     return proof
 
 
+def run_inference(
+    plan: dict[str, Any], recipe: dict[str, Any], endpoint: str, payload_path: Path,
+    output_path: Path, response_path: Path, proof_path: Path, *, timeout: float = 1800,
+    poll_interval: float = 2, opener: OpenUrl = urllib.request.urlopen,
+    archive: DeploymentArchive | None = None,
+) -> dict[str, Any]:
+    """执行真实推理，并把成功或失败尝试自动写入部署档案。"""
+    try:
+        proof = _run_inference_unrecorded(
+            plan,
+            recipe,
+            endpoint,
+            payload_path,
+            output_path,
+            response_path,
+            proof_path,
+            timeout=timeout,
+            poll_interval=poll_interval,
+            opener=opener,
+        )
+    except Exception as exc:
+        if archive is not None:
+            target = plan.get("target")
+            review = plan.get("review")
+            existing_artifacts = tuple(
+                path
+                for path in (payload_path, response_path, output_path, proof_path)
+                if path.is_file()
+            )
+            archive.record(
+                stage="INFERENCE",
+                status="BLOCKED",
+                summary="真实推理未能完成，已保留现有证据",
+                host_id=(
+                    str(target["host_id"])
+                    if isinstance(target, dict) and target.get("host_id")
+                    else None
+                ),
+                artifacts=existing_artifacts,
+                details={
+                    "error_type": exc.__class__.__name__,
+                    "endpoint": endpoint.rstrip("/"),
+                    "plan_sha256": (
+                        review.get("plan_sha256") if isinstance(review, dict) else None
+                    ),
+                },
+            )
+        raise
+    if archive is not None:
+        archive.record(
+            stage="INFERENCE",
+            status="PASS",
+            summary="真实推理已完成，请求、响应、输出和证明均已收录",
+            host_id=str(plan["target"]["host_id"]),
+            artifacts=[payload_path, response_path, output_path, proof_path],
+            details={
+                "job_id": proof["job"]["job_id"],
+                "endpoint": endpoint.rstrip("/"),
+                "plan_sha256": plan["review"]["plan_sha256"],
+            },
+        )
+    return proof
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="运行一项已审核的真实推理验证任务")
     parser.add_argument("--plan", required=True, type=Path)
@@ -195,6 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         run_inference(
             plan, load_document(args.recipe), args.endpoint,
             args.request_payload, args.media_output, args.response_output, args.proof_output,
+            archive=DeploymentArchive(plan["deployment_id"]),
         )
         print(f"COMPLETED: {args.proof_output}")
         return 0

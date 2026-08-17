@@ -9,8 +9,9 @@ import json
 import os
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -23,6 +24,7 @@ from scripts._common import (
     load_document,
     validate_instance,
 )
+from scripts.deployment_archive import DeploymentArchive
 from scripts.preflight import GateResult, host_preflight
 from scripts.probe_host import (
     CommandResult,
@@ -42,6 +44,8 @@ class ExecutionBlocked(RuntimeError):
 @dataclass(frozen=True)
 class StepResult:
     step_id: str
+    started_at: str
+    completed_at: str
     returncode: int
     stdout: str
     stderr: str
@@ -610,7 +614,7 @@ def _probe_runtime_artifact(plan: Mapping[str, Any], transport: CommandTransport
         raise ExecutionBlocked("已安装框架运行时与已审核不可变 pin 不一致")
 
 
-def execute_plan(
+def _execute_plan_unrecorded(
     plan: Mapping[str, Any],
     transport: CommandTransport,
     *,
@@ -674,6 +678,7 @@ def execute_plan(
                         str(gpu_id) for gpu_id in plan["target"]["gpu_ids"]
                     )
                 argv = tuple(step["command"])
+                step_started_at = datetime.now(timezone.utc).isoformat()
                 try:
                     result: CommandResult = transport.run(
                         argv, timeout=timeout, cwd=step.get("working_directory"), env=step_env
@@ -686,6 +691,8 @@ def execute_plan(
                     raise ExecutionBlocked(f"检测到 {step['step_id']} 的命令漂移")
                 recorded = StepResult(
                     step["step_id"],
+                    step_started_at,
+                    datetime.now(timezone.utc).isoformat(),
                     result.returncode,
                     _redact(result.stdout, secrets),
                     _redact(result.stderr, secrets),
@@ -699,6 +706,165 @@ def execute_plan(
                     )
                 completed.add(step["step_id"])
     return ExecutionResult("EXECUTED", tuple(results))
+
+
+def execute_plan(
+    plan: Mapping[str, Any],
+    transport: CommandTransport,
+    *,
+    request: Mapping[str, Any],
+    host_profile: Mapping[str, Any],
+    required_cuda: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    dotenv_path: Path | None = None,
+    lock_directory: Path = Path("/tmp"),
+    timeout: int = 300,
+    _probe_collector: Callable[[CommandTransport], Mapping[str, Any]] | None = None,
+    archive: DeploymentArchive | None = None,
+) -> ExecutionResult:
+    """执行计划；提供档案时自动保存每步脱敏结果及失败事故。"""
+    started_at = datetime.now(timezone.utc).isoformat()
+    deployment_context = _deployment_archive_context(plan, request)
+    try:
+        result = _execute_plan_unrecorded(
+            plan,
+            transport,
+            request=request,
+            host_profile=host_profile,
+            required_cuda=required_cuda,
+            environ=environ,
+            dotenv_path=dotenv_path,
+            lock_directory=lock_directory,
+            timeout=timeout,
+            _probe_collector=_probe_collector,
+        )
+    except Exception as exc:
+        if archive is not None:
+            blocker = _redact(
+                str(exc),
+                _secret_values(
+                    dict(environ if environ is not None else os.environ), dotenv_path
+                ),
+            )
+            archive.record(
+                stage="EXECUTE",
+                status="BLOCKED",
+                summary="远程执行在完成前被阻止",
+                host_id=str(plan.get("target", {}).get("host_id", "unknown")),
+                details={
+                    "plan_sha256": plan.get("review", {}).get("plan_sha256"),
+                    "started_at": started_at,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "steps": [],
+                    "blocker": blocker,
+                    "deployment": deployment_context,
+                },
+            )
+        raise
+    if archive is not None:
+        archive.record(
+            stage="EXECUTE",
+            status=result.status,
+            summary=(
+                "已执行完整审核计划"
+                if result.status == "EXECUTED"
+                else "远程执行因步骤失败而停止"
+            ),
+            host_id=str(plan["target"]["host_id"]),
+            details={
+                "plan_sha256": plan["review"]["plan_sha256"],
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "steps": [
+                    {
+                        "step_id": step.step_id,
+                        "started_at": step.started_at,
+                        "completed_at": step.completed_at,
+                        "returncode": step.returncode,
+                        "stdout": step.stdout,
+                        "stderr": step.stderr,
+                    }
+                    for step in result.steps
+                ],
+                "blocker": result.blocker,
+                "environment": (
+                    f"host_id={plan['target']['host_id']}; "
+                    f"framework={plan['framework']['name']}@{plan['framework']['version']}"
+                ),
+                "deployment": deployment_context,
+            },
+        )
+    return result
+
+
+def _deployment_archive_context(
+    plan: Mapping[str, Any], request: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "request_ref": f"request:{request['request_id']}",
+        "plan_ref": f"sha256:{plan['review']['plan_sha256']}",
+        "model": {
+            "id": plan["model"]["id"],
+            "variant": plan["model"]["variant"],
+            "path": plan["target"]["model_root"],
+        },
+        "framework": {
+            "name": plan["framework"]["name"],
+            "version": plan["framework"]["version"],
+        },
+        "target": {
+            "gpu_ids": list(plan["target"]["gpu_ids"]),
+            "install_root": plan["target"]["install_root"],
+            "bind_host": plan["service"]["bind_host"],
+            "port": plan["service"]["port"],
+        },
+    }
+
+
+def archive_reviewed_lifecycle(
+    archive: DeploymentArchive,
+    plan: Mapping[str, Any],
+    *,
+    request_path: Path,
+    host_profile_path: Path,
+    plan_path: Path,
+) -> None:
+    """校验 READY 计划后，把规划前六阶段及其原始制品逐项归档。"""
+    validate_executable_plan(plan)
+    if load_document(plan_path) != plan:
+        raise ExecutionBlocked("待归档计划文件与已校验计划不一致")
+    extras = {
+        "REQUIREMENT_GATE": (request_path,),
+        "HOST_DISCOVERY": (host_profile_path,),
+        "PLAN_REVIEW": (plan_path,),
+    }
+    for transition in plan["lifecycle"]["transitions"]:
+        stage = str(transition["stage"])
+        if stage not in {
+            "INTAKE",
+            "REQUIREMENT_GATE",
+            "HOST_DISCOVERY",
+            "RESEARCH",
+            "PLAN",
+            "PLAN_REVIEW",
+        }:
+            continue
+        lifecycle_path = _resolved_repo_file(
+            str(transition["artifact"]["path"]), ROOT
+        )
+        artifacts = list(dict.fromkeys((lifecycle_path, *extras.get(stage, ()))))
+        archive.record(
+            stage=stage,
+            status="PASS",
+            summary=f"{stage} 阶段已通过并保存校验证据",
+            host_id=str(plan["target"]["host_id"]),
+            artifacts=artifacts,
+            occurred_at=str(transition["completed_at"]),
+            details={
+                "plan_sha256": plan["review"]["plan_sha256"],
+                "source_sha256": transition["artifact"]["sha256"],
+            },
+        )
 
 
 def _host_matches_artifacts(
@@ -736,10 +902,20 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     transport: CommandTransport | None = None
+    archive: DeploymentArchive | None = None
+    execution_started = False
     try:
         plan = load_document(args.plan)
         request = load_document(args.request)
         profile = load_document(args.host_profile)
+        archive = DeploymentArchive(plan["deployment_id"])
+        archive_reviewed_lifecycle(
+            archive,
+            plan,
+            request_path=args.request,
+            host_profile_path=args.host_profile,
+            plan_path=args.plan,
+        )
         if not _host_matches_artifacts(args.host, request, profile):
             raise ExecutionBlocked("SSH 主机未同时绑定至请求和观测身份")
         locator = request["target"]["host"]
@@ -751,6 +927,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             dotenv_path=args.env_file,
         )
+        execution_started = True
         result = execute_plan(
             plan,
             transport,
@@ -759,6 +936,7 @@ def main(argv: list[str] | None = None) -> int:
             required_cuda=args.required_cuda,
             dotenv_path=args.env_file,
             lock_directory=args.lock_directory,
+            archive=archive,
         )
         summary = {
             "status": result.status,
@@ -770,7 +948,24 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(summary, indent=2))
         return 0 if result.status == "EXECUTED" else 3
     except (ExecutionBlocked, HarnessError, OSError, ValueError) as exc:
-        print(json.dumps({"status": "BLOCKED", "blocker": str(exc)}, indent=2))
+        blocker = _redact(str(exc), _secret_values(dict(os.environ), args.env_file))
+        if archive is not None and not execution_started:
+            with suppress(HarnessError, OSError):
+                archive.record(
+                    stage="EXECUTE",
+                    status="BLOCKED",
+                    summary="远程执行尚未开始便被安全门禁阻止",
+                    host_id=str(plan.get("target", {}).get("host_id", "unknown")),
+                    details={
+                        "plan_sha256": plan.get("review", {}).get("plan_sha256"),
+                        "started_at": datetime.now(timezone.utc).isoformat(),
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                        "steps": [],
+                        "blocker": blocker,
+                        "deployment": _deployment_archive_context(plan, request),
+                    },
+                )
+        print(json.dumps({"status": "BLOCKED", "blocker": blocker}, indent=2))
         return 2
     finally:
         if transport is not None:

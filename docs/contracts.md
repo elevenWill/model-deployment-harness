@@ -22,6 +22,8 @@
 | InferenceProof | `schemas/inference-proof.schema.json` | 与已审核计划绑定的请求、完成任务响应、endpoint 和输出 |
 | SemanticOutputReview | `schemas/semantic-review.schema.json` | 绑定精确生成输出的具名语义审核 |
 | LifecycleArtifact | `schemas/lifecycle-artifact.schema.json` | 与请求和部署绑定的、仅 PASS 的带类型阶段证据 |
+| DeploymentArchive | `schemas/deployment-archive.schema.json` | 按时间顺序保存全过程事件和带哈希制品引用 |
+| ExecutionRecord | `schemas/execution-record.schema.json` | 每个远程步骤的起止时间、退出码和脱敏输出 |
 
 `schemas/common.schema.json` 包含共享 scalar 和 artifact-reference 定义。
 
@@ -83,6 +85,10 @@ known state 是历史预期。observed state 是带时间戳的实时检查。re
 ## 知识完整性
 
 Incident 区分假设、已确认或未知原因。`RESOLVED` 需要已确认原因、已验证修复和 verification reference。Lesson 从 `HYPOTHESIS` 开始；提升为 `VERIFIED` 需要时间戳、验证者、证据和一个或多个 verification reference。Decision record 保留被拒绝的替代方案和证据，确保结论可审计。
+
+所有生命周期命令通过 `DeploymentArchive.record()` 追加到 `deployments/<deployment-id>/archive.json`。需求草稿和主机观测在生成时归档；执行器在再次校验 `READY` 计划后，补齐需求门禁、研究、计划与审核阶段的已哈希制品；每个远程步骤另存执行记录。执行失败自动生成 `Incident`，验证结果自动更新 `DeploymentRecord`，只有 `VERIFIED` 才自动生成 `Benchmark`。
+
+自动沉淀不自动编造结论。`Lesson` 与 `DecisionRecord` 只有在存在明确来源、证据引用或具名人工判断时才可写入；普通失败不会自动晋升为经验，未经完整验证的性能数据也不会成为基准。
 
 ## 验证方式
 

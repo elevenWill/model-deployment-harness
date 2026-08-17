@@ -17,3 +17,5 @@ inventory/hosts/*
 !inventory/hosts/.gitkeep
 knowledge/benchmarks/*
 !knowledge/benchmarks/.gitkeep
+knowledge/incidents/*
+!knowledge/incidents/.gitkeep

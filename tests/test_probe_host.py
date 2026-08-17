@@ -11,6 +11,7 @@ from scripts.probe_host import (
     CommandResult,
     ParamikoTransport,
     collect_host_profile,
+    main,
 )
 
 FIXTURE = Path(__file__).parent / "fixtures/host_probe_outputs.json"
@@ -91,3 +92,42 @@ def test_paramiko_authentication_is_key_first_then_environment_password():
     assert client.calls[0]["look_for_keys"] is True
     assert client.calls[1]["password"] == "not-printed"
     assert client.calls[1]["look_for_keys"] is False
+
+
+def test_probe_cli_automatically_records_host_discovery(monkeypatch, tmp_path):
+    transport = FakeTransport(json.loads(FIXTURE.read_text()))
+    monkeypatch.setattr(
+        ParamikoTransport,
+        "connect",
+        classmethod(lambda cls, *args, **kwargs: transport),
+    )
+    profile_path = tmp_path / "host-profile.json"
+    archive_root = tmp_path / "deployments"
+
+    assert main(
+        [
+            "--host",
+            "192.168.121.30",
+            "--host-id",
+            "host-30",
+            "--username",
+            "super",
+            "--output",
+            str(profile_path),
+            "--deployment-id",
+            "dep-probe",
+            "--archive-root",
+            str(archive_root),
+        ]
+    ) == 0
+
+    archive = json.loads(
+        (archive_root / "dep-probe" / "archive.json").read_text(encoding="utf-8")
+    )
+    event = archive["events"][0]
+    assert (event["stage"], event["status"], event["host_id"]) == (
+        "HOST_DISCOVERY",
+        "PASS",
+        "host-30",
+    )
+    assert event["artifacts"][0]["path"] == str(profile_path)

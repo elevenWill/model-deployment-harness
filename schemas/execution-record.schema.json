@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-record.schema.json",
+  "title": "远程执行记录",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "execution_id", "deployment_id", "host_id", "plan_sha256", "started_at", "completed_at", "status", "steps"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "execution_id": {"type": "string", "minLength": 1},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "host_id": {"type": "string", "minLength": 1},
+    "plan_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+    "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "completed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "status": {"type": "string", "enum": ["EXECUTED", "BLOCKED", "FAILED"]},
+    "blocker": {"type": "string", "minLength": 1},
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step_id", "started_at", "completed_at", "returncode", "stdout_redacted", "stderr_redacted"],
+        "properties": {
+          "step_id": {"type": "string", "minLength": 1},
+          "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+          "completed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+          "returncode": {"type": "integer"},
+          "stdout_redacted": {"type": "string"},
+          "stderr_redacted": {"type": "string"},
+          "output_truncated": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

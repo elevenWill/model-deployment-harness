@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "deployment-archive.schema.json",
+  "title": "部署全过程档案",
+  "description": "按时间顺序保存部署生命周期事件及经哈希校验的制品引用。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "deployment_id", "created_at", "updated_at", "events"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "updated_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["event_id", "sequence", "occurred_at", "stage", "status", "summary", "artifacts"],
+        "properties": {
+          "event_id": {"type": "string", "minLength": 1},
+          "sequence": {"type": "integer", "minimum": 1},
+          "occurred_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+          "stage": {
+            "type": "string",
+            "enum": ["INTAKE", "REQUIREMENT_GATE", "HOST_DISCOVERY", "RESEARCH", "PLAN", "PLAN_REVIEW", "EXECUTE", "INFERENCE", "VERIFY", "RECORD"]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["DRAFT", "STARTED", "PASS", "EXECUTED", "VERIFIED", "RECORDED", "INCOMPLETE", "BLOCKED", "FAILED"]
+          },
+          "summary": {"type": "string", "minLength": 1},
+          "host_id": {"type": "string", "minLength": 1},
+          "artifacts": {
+            "type": "array",
+            "items": {"$ref": "common.schema.json#/$defs/artifactReference"}
+          },
+          "details": {"type": "object"}
+        }
+      }
+    }
+  }
+}

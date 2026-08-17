@@ -17,18 +17,22 @@ from typing import Protocol
 
 try:
     from scripts._common import (
+        ROOT,
         SUPPORTED_CREDENTIAL_ENVIRONMENT_NAMES,
         HarnessError,
         atomic_write_json,
         validate_instance,
     )
+    from scripts.deployment_archive import DeploymentArchive
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from _common import (  # type: ignore[no-redef]
+        ROOT,
         SUPPORTED_CREDENTIAL_ENVIRONMENT_NAMES,
         HarnessError,
         atomic_write_json,
         validate_instance,
     )
+    from deployment_archive import DeploymentArchive  # type: ignore[no-redef]
 
 
 @dataclass(frozen=True)
@@ -512,6 +516,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--alias", action="append", default=[])
     parser.add_argument("--env-file", type=Path, default=Path.cwd() / ".env")
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--deployment-id", help="关联的部署 ID；提供后自动写入全过程档案")
+    parser.add_argument(
+        "--archive-root", type=Path, default=ROOT / "deployments", help="部署归档根目录"
+    )
     return parser
 
 
@@ -528,9 +536,26 @@ def main(argv: list[str] | None = None) -> int:
         profile = collect_host_profile(transport, host_id=args.host_id, aliases=args.alias)
         validate_instance(profile, "host-profile.schema.json")
         atomic_write_json(args.output, profile)
+        if args.deployment_id:
+            DeploymentArchive(args.deployment_id, root=args.archive_root).record(
+                stage="HOST_DISCOVERY",
+                status="PASS" if profile["probe"]["status"] == "COMPLETE" else "INCOMPLETE",
+                summary="只读主机检查完成",
+                host_id=args.host_id,
+                artifacts=(args.output,),
+                details={"probe_status": profile["probe"]["status"]},
+            )
         print(f"{profile['probe']['status']}: {args.output}")
         return 0 if profile["probe"]["status"] == "COMPLETE" else 3
     except (HarnessError, OSError, ValueError, ConnectionError) as exc:
+        if args.deployment_id:
+            DeploymentArchive(args.deployment_id, root=args.archive_root).record(
+                stage="HOST_DISCOVERY",
+                status="BLOCKED",
+                summary="只读主机检查未能完成",
+                host_id=args.host_id,
+                details={"error_type": exc.__class__.__name__},
+            )
         print(f"BLOCKED: {exc.__class__.__name__}")
         return 2
     finally:
