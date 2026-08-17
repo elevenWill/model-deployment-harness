@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-registry.schema.json",
+  "title": "主机登记表",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "updated_at", "hosts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "updated_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "hosts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["host_id", "hostname", "addresses", "aliases", "known_state"],
+        "properties": {
+          "host_id": {"type": "string", "minLength": 1},
+          "hostname": {"type": "string", "minLength": 1},
+          "addresses": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "known_state": {
+            "type": "object", "additionalProperties": false, "required": ["recorded_at", "deployment_ids"],
+            "properties": {
+              "recorded_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+              "deployment_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+              "notes": {"type": "array", "items": {"type": "string"}}
+            }
+          },
+          "observed_state": {
+            "type": "object", "additionalProperties": false, "required": ["checked_at", "probe_status", "host_profile_ref"],
+            "properties": {
+              "checked_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+              "probe_status": {"type": "string", "enum": ["COMPLETE", "PARTIAL", "FAILED"]},
+              "host_profile_ref": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    }
+  }
+}

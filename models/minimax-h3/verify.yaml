@@ -1,0 +1,31 @@
+schema_version: "1.0"
+model_id: minimax-h3
+required_levels: [L1_environment, L2_process, L3_port, L4_api, L5_real_inference, L6_output_validation]
+smoke_inference:
+  task: t2va
+  variant: fl2va
+  seed: fixed_and_recorded
+  duration_seconds: 5
+  short_edge_pixels: 768
+  user_prompt_required: true
+inference_api:
+  submit_paths: [/v1/videos]
+  submit_path: /v1/videos
+  status_path_template: /v1/videos/{id}
+  content_path_template: /v1/videos/{id}/content
+output_validation:
+  container: mp4
+  non_empty: true
+  full_decode_command: [ffmpeg, -v, error, -i, "{output}", -f, "null", -]
+  probe_command: [ffprobe, -v, error, -show_streams, -show_format, -of, json, "{output}"]
+  video: {codec: h264, fps: 24}
+  audio: {codec: aac, sample_rate_hz: 32000, channels: 2}
+  duration_seconds: {minimum: 4, maximum: 15}
+  semantic_checks:
+    - 代表性帧并非空白或冻结画面
+    - 存在音频且并非明显静音
+    - 输出与请求的任务和提示词/参考输入相符
+verified_requires: [L5_real_inference, L6_output_validation]
+evidence_contracts:
+  inference_proof: schemas/inference-proof.schema.json
+  semantic_review: schemas/semantic-review.schema.json

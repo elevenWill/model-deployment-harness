@@ -1,0 +1,43 @@
+schema_version: "1.0"
+model_id: minimax-h3
+scope: 上游已观察到的精确运行配置；并非通用最低要求。
+profiles:
+  - id: sglang-4xh200-resident
+    framework: sglang
+    gpu: {model: H200, count: 4, memory_gib_each: 141}
+    strategy: resident_ulysses4
+    confidence: HIGH
+    evidence: SGL-DOC
+  - id: sglang-4xh100-80gb
+    framework: sglang
+    gpu: {model: H100, count: 4, memory_gib_each: 80}
+    strategy: tp2_ulysses2
+    confidence: HIGH
+    evidence: SGL-MATRIX
+  - id: sglang-2xrtx5090-offload
+    framework: sglang
+    gpu: {model: RTX 5090, count: 2, memory_gib_each: 32}
+    host_ram: {minimum_available_gib: 200, recommended_total_gib: 384}
+    strategy: tp2_layerwise_offload
+    confidence: HIGH
+    evidence: SGL-MATRIX
+  - id: vllm-omni-2xrtx5090-dlo
+    framework: vllm-omni
+    gpu: {model: RTX 5090, count: 2, memory_gib_each: 32}
+    host_ram: {minimum_available_gib: 200, recommended_total_gib: 384}
+    strategy: tp2_distributed_layerwise_offload
+    confidence: HIGH
+    evidence: VLO-REC
+
+preflight_requirements:
+  - 用户精确指定的 GPU ID 存在且未被占用
+  - 已记录拓扑与对等访问情况
+  - 目标任务、分辨率、时长和参考输入范围符合有证据支持的配置
+  - 主机内存以及模型、缓存、临时和输出磁盘分别具有充足余量
+  - 驱动与 CUDA 兼容性匹配已固定版本的框架运行时
+  - 框架 commit 或容器摘要不可变，且可证明具备 H3 能力
+
+unsupported_in_mvp:
+  - AMD 或 ROCm 目标
+  - 将已列配置外推到不同 GPU 或互连方式
+  - 未经单独审核 Recipe 的跨节点部署

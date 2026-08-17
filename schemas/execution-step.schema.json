@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-step.schema.json",
+  "title": "执行步骤",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["step_id", "sequence", "name", "action", "action_class", "command", "success_criteria", "rollback_step_ids"],
+  "properties": {
+    "step_id": {"type": "string", "minLength": 1},
+    "sequence": {"type": "integer", "minimum": 1},
+    "name": {"type": "string", "minLength": 1},
+    "action": {"type": "string", "enum": ["inspect", "create_target_directory", "create_isolated_venv", "pull_container", "download_model", "create_service_config", "start_own_service", "change_nvidia_driver", "change_system_cuda", "apt_upgrade", "stop_gpu_job", "kill_unrelated_process", "delete_existing_model", "modify_firewall", "modify_ssh_config", "reboot", "format_or_mount_disk", "modify_system_python", "other"]},
+    "action_class": {"type": "string", "enum": ["READ_ONLY", "PLAN_ALLOWED_WRITE", "PROTECTED"]},
+    "command": {"type": "array", "minItems": 1, "items": {"type": "string"}, "description": "参数向量；不得包含机密。"},
+    "working_directory": {"$ref": "common.schema.json#/$defs/absolutePath"},
+    "environment_variable_names": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$"}},
+    "depends_on": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "success_criteria": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "rollback_step_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "enum": ["NOT_REQUIRED", "PENDING", "APPROVED", "REJECTED"]},
+        "approved_by": {"type": "string", "minLength": 1},
+        "approved_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+        "scope": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"action_class": {"const": "PROTECTED"}}, "required": ["action_class"]}, "then": {"required": ["approval"], "properties": {"approval": {"required": ["status", "approved_by", "approved_at", "scope"], "properties": {"status": {"const": "APPROVED"}}}}}},
+    {"if": {"properties": {"action": {"enum": ["change_nvidia_driver", "change_system_cuda", "apt_upgrade", "stop_gpu_job", "kill_unrelated_process", "delete_existing_model", "modify_firewall", "modify_ssh_config", "reboot", "format_or_mount_disk", "modify_system_python"]}}, "required": ["action"]}, "then": {"properties": {"action_class": {"const": "PROTECTED"}}}}
+  ]
+}

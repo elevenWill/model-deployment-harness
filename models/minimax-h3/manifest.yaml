@@ -1,0 +1,58 @@
+schema_version: "1.0"
+model:
+  id: minimax-h3
+  family: MiniMax-H3
+  release: H3-Base
+  publisher: MiniMaxAI
+  source_revision: 42ed227ee7df40d41602854ae760620d6eb651fe
+  repository: https://huggingface.co/MiniMaxAI/MiniMax-H3
+  variants:
+    - id: fl2va
+      checkpoint_path: FL2VA
+      tasks: [t2va, fl2va]
+      approximate_size_gib: 135
+    - id: ref2va
+      checkpoint_path: Ref2VA
+      tasks: [ref2va, v2v]
+      approximate_size_gib: 135
+    - id: both
+      checkpoint_paths: [FL2VA, Ref2VA]
+      approximate_size_gib: 270
+
+supported_frameworks:
+  - name: sglang
+    recipe: recipes/sglang.yaml
+    evidence: SGL-DOC
+  - name: vllm-omni
+    recipe: recipes/vllm-omni.yaml
+    evidence: VLO-REC
+
+download:
+  mechanism: huggingface_snapshot
+  revision_required: true
+  authentication: probe_then_environment_HF_TOKEN
+  root_files: [model_index.json]
+
+local_output:
+  short_edge_pixels: 768
+  fps: 24
+  audio_hz: 32000
+  audio_channels: 2
+  duration_seconds: {minimum: 4, maximum: 15}
+  full_2k_requires_hosted_services: true
+
+license:
+  type: MiniMax H3 Community License
+  source: https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/42ed227ee7df40d41602854ae760620d6eb651fe/LICENSE
+  requires_review: true
+  excluded_territories_without_separate_license: [EU, UK, KR, US]
+  revenue_authorization_threshold_usd: 20000000
+  gate_status_default: NEEDS_REVIEW
+  note: Harness 用于识别风险，不提供法律建议。
+
+verification: verify.yaml
+research:
+  official_sources: ../../research/minimax-h3/official-sources.md
+  deployment_options: ../../research/minimax-h3/deployment-options.md
+  hardware_notes: ../../research/minimax-h3/hardware-notes.md
+  open_questions: ../../research/minimax-h3/open-questions.md

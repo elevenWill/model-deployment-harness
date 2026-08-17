@@ -1,0 +1,42 @@
+schema_version: "1.0"
+model_id: minimax-h3
+framework:
+  name: sglang
+  component: sglang-diffusion
+  source: https://github.com/sgl-project/sglang
+  documentation_commit: a54de989c8ba817ebb603c5443e694e5fcf7edb1
+  deployment_pin: a54de989c8ba817ebb603c5443e694e5fcf7edb1
+  pin_required_before_ready: true
+
+model_path_semantics:
+  value: root_repository_or_snapshot
+  variant_flag: --model-variant
+  warning: 不要将 --model-path 指向 FL2VA 或 Ref2VA 子目录。
+
+launch_template:
+  argv:
+    - sglang
+    - serve
+    - --model-path
+    - "{model_root_or_id}"
+    - --model-variant
+    - "{variant}"
+    - --num-gpus
+    - "{gpu_count}"
+    - --host
+    - "{bind_host}"
+    - --port
+    - "{port}"
+  required_explicit_values: [variant, gpu_ids, bind_host, port, topology_profile]
+  append_from_compatible_profile_only: true
+
+api:
+  submit: POST /v1/videos
+  status: GET /v1/videos/{id}
+  content: GET /v1/videos/{id}/content
+
+constraints:
+  cfg_parallel_size: 1
+  full_attention: true
+  compile_changes_numerics: true
+  approximate_optimizations_require_ab_validation: true

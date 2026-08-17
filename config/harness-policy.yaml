@@ -1,0 +1,124 @@
+schema_version: "1.0"
+
+pipeline:
+  stages: [INTAKE, REQUIREMENT_GATE, HOST_DISCOVERY, RESEARCH, PLAN, PLAN_REVIEW, EXECUTE, VERIFY, RECORD]
+  forbid_stage_skips: true
+
+requirement_gate:
+  contract: schemas/deployment-request.schema.json
+  missing_required_intent_status: NEEDS_USER_INPUT
+  required_user_intent:
+    - requested_by
+    - target.host
+    - target.host.ssh_username
+    - target.host.ssh_port
+    - target.gpu_ids
+    - target.install_root
+    - target.model_root
+    - model.id
+    - model.variant
+    - framework_preference
+    - service.mode
+    - service.bind_host
+    - service.port
+    - existing_environment_policy
+    - intended_use
+    - deployment_region
+  discoverable_host_facts:
+    - identity.hostname
+    - identity.addresses
+    - hardware.cpu
+    - hardware.memory_bytes
+    - hardware.gpus
+    - hardware.gpu_topology
+    - software.os
+    - software.kernel
+    - software.nvidia
+    - software.docker
+    - software.python
+    - storage
+    - network.listening_ports
+    - runtime.gpu_processes
+    - runtime.model_services
+  defaults_for_required_user_intent: forbidden
+
+remote_execution:
+  single_writer: true
+  remote_writer_role: executor
+  executable_plan_status: READY
+  require_approved_review: true
+  require_plan_hash_match: true
+  plan_hash_algorithm:
+    digest: sha256
+    serialization: canonical_json_utf8
+    exclude_paths: [review.plan_sha256]
+  research_remote_write: forbidden
+  planner_remote_write: forbidden
+  reviewer_remote_write: forbidden
+  read_only_actions:
+    - inspect
+  plan_allowed_writes:
+    - create_target_directory
+    - create_isolated_venv
+    - pull_container
+    - download_model
+    - create_service_config
+    - start_own_service
+  protected_actions:
+    approval: manual_outside_mvp
+    actions:
+      - change_nvidia_driver
+      - change_system_cuda
+      - apt_upgrade
+      - stop_gpu_job
+      - kill_unrelated_process
+      - delete_existing_model
+      - modify_firewall
+      - modify_ssh_config
+      - reboot
+      - format_or_mount_disk
+      - modify_system_python
+  unknown_action: blocked
+  environment_conflict_strategy: isolate
+  live_preflight_required: true
+  live_reprobe_before_each_write: true
+  remote_lock:
+    required: true
+    directory: /tmp/model-deployment-harness-writer-lock
+    stale_lock_removal: forbidden
+  command_policy:
+    shell_interpreters_forbidden: [sh, bash, zsh, dash, fish, csh, tcsh]
+    inspect: [test]
+    create_target_directory: [mkdir]
+    create_isolated_venv: [python, python3, uv]
+    pull_container: [docker, podman]
+    download_model: [hf]
+    create_service_config: [install, cp]
+    start_own_service: [sglang, vllm, docker, podman]
+
+license_gate:
+  required_before_ready: true
+  allowed_ready_status: PASS
+  block_on:
+    - known_region_conflict
+    - known_intended_use_conflict
+    - unresolved_material_restriction
+    - insufficient_confidence
+  legal_advice: false
+
+verification:
+  levels: [L1_environment, L2_process, L3_port, L4_api, L5_real_inference, L6_output_validation]
+  verified_requires: [L5_real_inference, L6_output_validation]
+  required_outcome: PASS
+  process_running_is_success: false
+  installation_success_is_success: false
+
+registry:
+  known_state_is_historical: true
+  live_query_requires_fresh_probe_when_reachable: true
+  keep_known_and_observed_separate: true
+
+secrets:
+  allowed_sources: [environment, dotenv_untracked]
+  forbidden_destinations: [command_arguments, logs, registry, plans, deployment_records, git]
+  redact_logs: true

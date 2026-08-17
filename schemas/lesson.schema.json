@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lesson.schema.json",
+  "title": "经验教训",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "lesson_id", "created_at", "status", "statement", "scope", "evidence_refs"],
+  "properties": {
+    "schema_version": {"const": "1.0"}, "lesson_id": {"type": "string", "minLength": 1}, "created_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "status": {"type": "string", "enum": ["HYPOTHESIS", "VERIFIED"]}, "statement": {"type": "string", "minLength": 1},
+    "scope": {"type": "object", "additionalProperties": false, "required": ["model_ids", "frameworks", "hardware"], "properties": {"model_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "frameworks": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "hardware": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}, "constraints": {"type": "array", "items": {"type": "string", "minLength": 1}}}},
+    "evidence_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "verified_at": {"$ref": "common.schema.json#/$defs/timestamp"}, "verified_by": {"type": "string", "minLength": 1},
+    "verification_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "supersedes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  },
+  "allOf": [{"if": {"properties": {"status": {"const": "VERIFIED"}}, "required": ["status"]}, "then": {"required": ["verified_at", "verified_by", "verification_refs"], "properties": {"evidence_refs": {"minItems": 1}, "verification_refs": {"minItems": 1}}}}]
+}

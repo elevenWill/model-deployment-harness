@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "semantic-review.schema.json",
+  "title": "语义输出复核",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "review_id", "deployment_id", "plan_sha256", "output_sha256", "reviewed_by", "reviewed_at", "checks"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "review_id": {"type": "string", "minLength": 1},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "plan_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "output_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "reviewed_by": {"type": "string", "minLength": 1},
+    "reviewed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "checks": {"type": "object", "additionalProperties": false, "required": ["not_blank_or_frozen", "audio_present_not_silent", "task_alignment"], "properties": {"not_blank_or_frozen": {"const": "PASS"}, "audio_present_not_silent": {"const": "PASS"}, "task_alignment": {"const": "PASS"}}},
+    "notes": {"type": "string"}
+  }
+}

@@ -1,0 +1,40 @@
+schema_version: "1.0"
+model_id: minimax-h3
+framework:
+  name: vllm-omni
+  component: vllm-omni
+  source: https://github.com/vllm-project/vllm-omni
+  documentation_commit: d1e230c95ba12aec7664ee6fd18c0b2b2d0d6187
+  deployment_pin: d1e230c95ba12aec7664ee6fd18c0b2b2d0d6187
+  pin_required_before_ready: true
+
+requirements:
+  executables: [ffmpeg, ffprobe]
+  trust_remote_code_requires_review: true
+
+launch_template:
+  argv:
+    - vllm
+    - serve
+    - "{model_root_or_id}"
+    - --omni
+    - --trust-remote-code
+    - --num-gpus
+    - "{gpu_count}"
+    - --host
+    - "{bind_host}"
+    - --port
+    - "{port}"
+  required_explicit_values: [variant, gpu_ids, bind_host, port, topology_profile]
+  append_from_compatible_profile_only: true
+
+api:
+  asynchronous: /v1/videos
+  synchronous: /v1/videos/sync
+
+constraints:
+  core_vllm_alone_supported: false
+  cfg_parallel_size: 1
+  one_generation_request_per_diffusion_batch: true
+  first_request_is_warmup: true
+  approximate_optimizations_require_ab_validation: true

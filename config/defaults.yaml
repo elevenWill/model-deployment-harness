@@ -1,0 +1,11 @@
+# 安全的非机密运行默认值。必填用户意图字段绝不可放在这里。
+schema_version: "1.0"
+probe:
+  command_timeout_seconds: 20
+  connect_timeout_seconds: 10
+  max_output_bytes: 1048576
+verification:
+  request_timeout_seconds: 300
+registry:
+  hosts_directory: inventory/hosts
+  deployments_directory: deployments

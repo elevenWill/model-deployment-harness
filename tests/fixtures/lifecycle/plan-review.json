@@ -1,0 +1,1 @@
+{"schema_version":"1.0","stage":"PLAN_REVIEW","status":"PASS","request_id":"req-1","deployment_id":"dep-1","artifact_type":"PlanReview","source_artifact":{"path":"tests/fixtures/lifecycle/sources/plan-review.json","sha256":"c3ff8fadb6bbe53b1953ac2ffa655319890fa2ab15ed2f0e5a622ce370889aca","media_type":"application/json"}}

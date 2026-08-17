@@ -1,0 +1,38 @@
+schema_version: "1.0"
+
+tiers:
+  S:
+    description: 模型作者的官方代码仓库、模型页面与文档
+    decision_use: primary
+  A:
+    description: 框架、PyTorch、NVIDIA 及其他供应商的官方来源
+    decision_use: primary
+  B:
+    description: 维护者 GitHub Issue、讨论及维护者回复
+    decision_use: supplemental_edge_cases
+  C:
+    description: 高质量技术社区
+    decision_use: leads_only
+  D:
+    description: 博客、SEO 页面、社交媒体、转载与内容农场
+    decision_use: prohibited_for_critical_decisions
+
+rules:
+  deployment_decisions_require_tiers: [S, A]
+  tier_B_cannot_be_sole_support_for_critical_decision: true
+  tiers_C_D_may_generate_leads_only: true
+  conflicting_sources_prefer_higher_tier: true
+  unresolved_same_tier_conflict_status: BLOCKED
+  evidence_required_fields:
+    - source.title
+    - source.url
+    - source.authority_tier
+    - source.publisher
+    - retrieved_at
+    - claim
+    - applies_to
+    - confidence
+    - officially_verified
+    - inference
+  record_versions_when_available: true
+  record_retrieval_time: true

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "verification-result.schema.json",
+  "title": "验证结果",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "verification_id", "deployment_id", "host_id", "plan_sha256", "recipe_ref", "started_at", "completed_at", "levels", "overall_status", "metrics", "framework", "gpu_topology_summary", "command_redacted", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "verification_id": {"type": "string", "minLength": 1},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "host_id": {"type": "string", "minLength": 1},
+    "plan_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+    "recipe_ref": {"type": "string", "minLength": 1},
+    "started_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "completed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "levels": {
+      "type": "object", "additionalProperties": false, "required": ["L1_environment", "L2_process", "L3_port", "L4_api", "L5_real_inference", "L6_output_validation"],
+      "properties": {
+        "L1_environment": {"$ref": "#/$defs/check"}, "L2_process": {"$ref": "#/$defs/check"}, "L3_port": {"$ref": "#/$defs/check"}, "L4_api": {"$ref": "#/$defs/check"}, "L5_real_inference": {"$ref": "#/$defs/evidencedCheck"}, "L6_output_validation": {"$ref": "#/$defs/evidencedCheck"}
+      }
+    },
+    "overall_status": {"type": "string", "enum": ["VERIFIED", "FAILED", "BLOCKED", "INCOMPLETE"]},
+    "metrics": {
+      "type": "object", "additionalProperties": false, "required": ["generation_duration_seconds"],
+      "properties": {"generation_duration_seconds": {"type": ["number", "null"], "minimum": 0}, "peak_vram_bytes": {"type": ["integer", "null"], "minimum": 0}, "peak_ram_bytes": {"type": ["integer", "null"], "minimum": 0}}
+    },
+    "framework": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+    "gpu_topology_summary": {"type": "string"},
+    "command_redacted": {"type": "array", "items": {"type": "string"}},
+    "artifacts": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/artifactReference"}}
+  },
+  "$defs": {
+    "check": {"type": "object", "additionalProperties": false, "required": ["status", "checked_at", "detail"], "properties": {"status": {"$ref": "common.schema.json#/$defs/outcome"}, "checked_at": {"$ref": "common.schema.json#/$defs/timestamp"}, "detail": {"type": "string", "minLength": 1}, "evidence": {"type": "array", "items": {"$ref": "common.schema.json#/$defs/artifactReference"}}}},
+    "evidencedCheck": {"allOf": [{"$ref": "#/$defs/check"}, {"if": {"properties": {"status": {"const": "PASS"}}, "required": ["status"]}, "then": {"required": ["evidence"], "properties": {"evidence": {"minItems": 1}}}}]}
+  },
+  "allOf": [{"if": {"properties": {"overall_status": {"const": "VERIFIED"}}, "required": ["overall_status"]}, "then": {"properties": {"levels": {"properties": {"L5_real_inference": {"properties": {"status": {"const": "PASS"}}}, "L6_output_validation": {"properties": {"status": {"const": "PASS"}}}}}, "metrics": {"properties": {"generation_duration_seconds": {"type": "number"}}}, "artifacts": {"minItems": 1}}}}]
+}

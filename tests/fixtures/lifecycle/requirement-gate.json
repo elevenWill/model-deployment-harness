@@ -1,0 +1,1 @@
+{"schema_version":"1.0","stage":"REQUIREMENT_GATE","status":"PASS","request_id":"req-1","deployment_id":"dep-1","artifact_type":"RequirementGate","source_artifact":{"path":"tests/fixtures/lifecycle/sources/requirement-gate.json","sha256":"87acc53b5af774c29721812ac79fa2609d542b2f87e6ef10954c60c686a72239","media_type":"application/json"}}

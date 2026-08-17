@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common.schema.json",
+  "title": "模型部署 Harness 通用定义",
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000]*$"},
+    "gpuId": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "string", "pattern": "^(GPU|MIG)-[A-Za-z0-9-]+$"}]},
+    "outcome": {"type": "string", "enum": ["PASS", "FAIL", "BLOCKED", "NOT_CHECKED"]},
+    "secretFree": {"description": "符合此契约的值绝不可包含凭据、令牌、私钥或机密环境变量值。"},
+    "artifactReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/nonEmptyString"},
+        "sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
+        "media_type": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

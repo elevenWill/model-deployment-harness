@@ -1,0 +1,1 @@
+{"schema_version":"1.0","stage":"RESEARCH","status":"PASS","request_id":"req-1","deployment_id":"dep-1","artifact_type":"ResearchBundle","source_artifact":{"path":"tests/fixtures/lifecycle/sources/research.json","sha256":"30b7d42298e298a1c3ea9225e9997b8bde414ed808909b89297be168612bd757","media_type":"application/json"}}

@@ -1,0 +1,1 @@
+{"schema_version":"1.0","stage":"HOST_DISCOVERY","status":"PASS","request_id":"req-1","deployment_id":"dep-1","artifact_type":"HostProfile","source_artifact":{"path":"tests/fixtures/lifecycle/sources/host-discovery.json","sha256":"9273dcea1d7602be3479654eb6e720dddfbdc30927909801713f7aa9801f9606","media_type":"application/json"}}

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "host-profile.schema.json",
+  "title": "主机画像",
+  "description": "刚刚侦察得到的主机事实，不是用户意图或永久有效的库存信息。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "host_id", "observed_at", "probe", "identity", "hardware", "software", "storage", "network", "runtime"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "host_id": {"type": "string", "minLength": 1},
+    "observed_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "probe": {
+      "type": "object", "additionalProperties": false, "required": ["status", "transport", "errors"],
+      "properties": {
+        "status": {"type": "string", "enum": ["COMPLETE", "PARTIAL", "FAILED"]},
+        "transport": {"type": "string", "enum": ["SSH", "LOCAL_FIXTURE"]},
+        "errors": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false, "required": ["hostname", "addresses", "aliases"],
+      "properties": {
+        "hostname": {"type": "string", "minLength": 1},
+        "addresses": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "aliases": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "hardware": {
+      "type": "object", "additionalProperties": false, "required": ["cpu", "memory_bytes", "gpus"],
+      "properties": {
+        "cpu": {"type": "object", "additionalProperties": false, "required": ["model", "logical_cores"], "properties": {"model": {"type": "string", "minLength": 1}, "logical_cores": {"type": "integer", "minimum": 1}, "architecture": {"type": "string", "minLength": 1}}},
+        "memory_bytes": {"type": "integer", "minimum": 0},
+        "gpus": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["index", "uuid", "model", "memory_total_bytes", "memory_free_bytes"], "properties": {"index": {"type": "integer", "minimum": 0}, "uuid": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1}, "memory_total_bytes": {"type": "integer", "minimum": 0}, "memory_free_bytes": {"type": "integer", "minimum": 0}}}},
+        "gpu_topology": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["gpu_a", "gpu_b", "link"], "properties": {"gpu_a": {"$ref": "common.schema.json#/$defs/gpuId"}, "gpu_b": {"$ref": "common.schema.json#/$defs/gpuId"}, "link": {"type": "string", "minLength": 1}}}}
+      }
+    },
+    "software": {
+      "type": "object", "additionalProperties": false, "required": ["os", "kernel", "nvidia", "docker", "python"],
+      "properties": {
+        "os": {"type": "object", "additionalProperties": false, "required": ["name", "version"], "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+        "kernel": {"type": "string", "minLength": 1},
+        "nvidia": {"type": "object", "additionalProperties": false, "required": ["driver_version", "cuda_compatibility"], "properties": {"driver_version": {"type": ["string", "null"]}, "cuda_compatibility": {"type": ["string", "null"]}}},
+        "docker": {"type": "object", "additionalProperties": false, "required": ["installed", "nvidia_runtime_available"], "properties": {"installed": {"type": "boolean"}, "version": {"type": ["string", "null"]}, "nvidia_runtime_available": {"type": "boolean"}}},
+        "python": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["executable", "version"], "properties": {"executable": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}}},
+        "uv_version": {"type": ["string", "null"]},
+        "conda_version": {"type": ["string", "null"]}
+      }
+    },
+    "storage": {
+      "type": "object", "additionalProperties": false, "required": ["filesystems", "mounts"],
+      "properties": {
+        "filesystems": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["path", "total_bytes", "available_bytes", "filesystem_type"], "properties": {"path": {"$ref": "common.schema.json#/$defs/absolutePath"}, "total_bytes": {"type": "integer", "minimum": 0}, "available_bytes": {"type": "integer", "minimum": 0}, "filesystem_type": {"type": "string", "minLength": 1}}}},
+        "mounts": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["source", "target", "options"], "properties": {"source": {"type": "string", "minLength": 1}, "target": {"$ref": "common.schema.json#/$defs/absolutePath"}, "options": {"type": "array", "items": {"type": "string"}}}}}
+      }
+    },
+    "network": {
+      "type": "object", "additionalProperties": false, "required": ["listening_ports", "connectivity_checks"],
+      "properties": {
+        "listening_ports": {"type": "array", "uniqueItems": true, "items": {"type": "integer", "minimum": 1, "maximum": 65535}},
+        "connectivity_checks": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["destination", "reachable"], "properties": {"destination": {"type": "string", "minLength": 1}, "reachable": {"type": "boolean"}, "detail": {"type": "string"}}}}
+      }
+    },
+    "runtime": {
+      "type": "object", "additionalProperties": false, "required": ["gpu_processes", "model_services"],
+      "properties": {
+        "gpu_processes": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["gpu_id", "pid", "process_name", "memory_bytes"], "properties": {"gpu_id": {"$ref": "common.schema.json#/$defs/gpuId"}, "pid": {"type": "integer", "minimum": 1}, "process_name": {"type": "string", "minLength": 1}, "memory_bytes": {"type": "integer", "minimum": 0}, "owner": {"type": "string"}}}},
+        "model_services": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["pid", "process_name", "ports"], "properties": {"pid": {"type": "integer", "minimum": 1}, "process_name": {"type": "string", "minLength": 1}, "ports": {"type": "array", "items": {"type": "integer", "minimum": 1, "maximum": 65535}}}}}
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inference-proof.schema.json",
+  "title": "推理凭证",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "producer", "deployment_id", "plan_sha256", "endpoint", "request", "job", "output"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "producer": {"const": "HARNESS_HTTP_RUNNER"},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "plan_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "endpoint": {"type": "string", "format": "uri"},
+    "request": {"type": "object", "additionalProperties": false, "required": ["method", "path", "payload", "submitted_at"], "properties": {"method": {"const": "POST"}, "path": {"type": "string", "pattern": "^/"}, "payload": {"$ref": "common.schema.json#/$defs/artifactReference"}, "submitted_at": {"$ref": "common.schema.json#/$defs/timestamp"}}},
+    "job": {"type": "object", "additionalProperties": false, "required": ["job_id", "status", "completed_at", "response", "runtime_error"], "properties": {"job_id": {"type": "string", "minLength": 1}, "status": {"const": "COMPLETED"}, "completed_at": {"$ref": "common.schema.json#/$defs/timestamp"}, "response": {"$ref": "common.schema.json#/$defs/artifactReference"}, "runtime_error": {"type": "null"}}},
+    "output": {"$ref": "common.schema.json#/$defs/artifactReference"}
+  }
+}

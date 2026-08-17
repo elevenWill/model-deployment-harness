@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lifecycle-artifact.schema.json",
+  "title": "生命周期制品",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "stage", "status", "request_id", "deployment_id", "artifact_type", "source_artifact"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "stage": {"enum": ["INTAKE", "REQUIREMENT_GATE", "HOST_DISCOVERY", "RESEARCH", "PLAN", "PLAN_REVIEW"]},
+    "status": {"const": "PASS"},
+    "request_id": {"type": "string", "minLength": 1},
+    "deployment_id": {"type": "string", "minLength": 1},
+    "artifact_type": {"enum": ["DeploymentRequest", "RequirementGate", "HostProfile", "ResearchBundle", "DeploymentPlanDraft", "PlanReview"]},
+    "source_artifact": {"$ref": "common.schema.json#/$defs/artifactReference"}
+  },
+  "allOf": [
+    {"if": {"properties": {"stage": {"const": "INTAKE"}}}, "then": {"properties": {"artifact_type": {"const": "DeploymentRequest"}}}},
+    {"if": {"properties": {"stage": {"const": "REQUIREMENT_GATE"}}}, "then": {"properties": {"artifact_type": {"const": "RequirementGate"}}}},
+    {"if": {"properties": {"stage": {"const": "HOST_DISCOVERY"}}}, "then": {"properties": {"artifact_type": {"const": "HostProfile"}}}},
+    {"if": {"properties": {"stage": {"const": "RESEARCH"}}}, "then": {"properties": {"artifact_type": {"const": "ResearchBundle"}}}},
+    {"if": {"properties": {"stage": {"const": "PLAN"}}}, "then": {"properties": {"artifact_type": {"const": "DeploymentPlanDraft"}}}},
+    {"if": {"properties": {"stage": {"const": "PLAN_REVIEW"}}}, "then": {"properties": {"artifact_type": {"const": "PlanReview"}}}}
+  ]
+}

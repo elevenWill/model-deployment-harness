@@ -1,0 +1,19 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+build/
+dist/
+*.egg-info/
+
+# Runtime artifacts may contain host details or large generated outputs.
+deployments/*
+!deployments/.gitkeep
+inventory/hosts/*
+!inventory/hosts/.gitkeep
+knowledge/benchmarks/*
+!knowledge/benchmarks/.gitkeep

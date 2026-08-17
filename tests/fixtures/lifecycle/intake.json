@@ -1,0 +1,1 @@
+{"schema_version":"1.0","stage":"INTAKE","status":"PASS","request_id":"req-1","deployment_id":"dep-1","artifact_type":"DeploymentRequest","source_artifact":{"path":"tests/fixtures/lifecycle/sources/intake.json","sha256":"5a0a233c74d63b6ea0cb874457b1d8349f9f48e908b6728c4d6568c6d66c841a","media_type":"application/json"}}
