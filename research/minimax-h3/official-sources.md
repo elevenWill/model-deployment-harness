@@ -12,6 +12,8 @@
 | VLO-REC | [vLLM-Omni H3 recipe](https://github.com/vllm-project/vllm-omni/blob/d1e230c95ba12aec7664ee6fd18c0b2b2d0d6187/recipes/MiniMaxAI/MiniMax-H3.md)（recipe commit `d1e230c`，2026-08-15） | 原生 `MiniMaxH3Pipeline`、下载布局、storage/RAM 指引、offload/parallel recipes、API、测量输出与限制。维护者字段为 “Community”。 | A | 有精确记录场景时为高；未测量起点为中 | 官方项目 recipe；部分证据特定于 development commit。 |
 | VLO-SUP | [vLLM-Omni 支持模型](https://github.com/vllm-project/vllm-omni/blob/5d09cf27a98bb104506ee842ca81e0e76e47dc92/docs/models/supported_models.md)（main 观测于 `5d09cf2`，2026-08-17） | 为 T2VA、FL2VA 和 Ref2VA 注册 `MiniMaxH3Pipeline`，包括 NVIDIA 与已验证 AMD 说明。 | A | 高 | 直接的项目支持声明。 |
 | VLLM-CORE | [vLLM 仓库](https://github.com/vllm-project/vllm/tree/5fd7a888386cff800f32de6b5a33d1dd3ca1e397)（main 观测于 `5fd7a88`，2026-08-17） | 递归 source-path 检查发现 MiniMax-M2/M3 text-model 支持，但没有 H3 audio-video pipeline。 | A | 中高 | **来自仓库检查的推断：** H3 应使用 vLLM-Omni，而不是仅 core vLLM。 |
+| COMFY-CORE-H3 | [ComfyUI MiniMax-H3 核心节点](https://github.com/Comfy-Org/ComfyUI/blob/0d80858061b511bd38c8cef4c235ef8e01040822/comfy_extras/nodes_minimax_h3.py)（commit `0d80858`，2026-08-17） | ComfyUI 原生 H3 节点与固定核心实现入口；同一 revision 的 requirements 固定 `comfy-kitchen==0.2.31`。 | A | 高 | 代码存在不等于目标 GPU 已兼容；需结合 L5/L6 实测。 |
+| COMFY-KITCHEN-PYPI | [PyPI comfy-kitchen 0.2.31](https://pypi.org/project/comfy-kitchen/0.2.31/) | 官方包元数据、Python 版本要求和平台 wheel；项目链接指向 Comfy-Org/comfy-kitchen。 | A | 高 | 安装时仍需记录实际 wheel 的 SHA-256。 |
 | MM-API | [Global MiniMax H3 API](https://platform.minimax.io/docs/api-reference/video-generation-v2-create) / [CN API](https://platform.minimaxi.com/docs/api-reference/video-generation-v2-create) | 托管 create endpoint；官方 README 也链接 Context-IR 和 Regenerate-2K API 用于完整 2K 工作流。 | S | 高 | 托管服务；credentials/terms/availability 随平台区域而异。 |
 
 ## 高置信模型事实
@@ -20,7 +22,7 @@
 - 完整产品 pipeline 并非完全本地：截至此 revision，H3-Context-IR 和 H3-Regenerate-2K 为托管/未开源。local Base 验证目标为 768-pixel short-edge 输出；复现官方质量的 2K 需要围绕本地 H3-Base 调用托管 API。
 - MiniMax/framework 来源记录的输出 contract：4–15 秒、24 FPS、32 kHz stereo audio；发布的本地质量 recipe 使用 768-pixel short edge。MiniMax 报告稳定支持 11 种 dialog language。
 - H3-Base 包含 33B dense Omni Transformer，并使用完整 Qwen3-VL-32B encoder 权重。约 13B transformer 参数为 AdaLN 相关 branch，其输出可针对固定 schedule cache；但公共 checkpoint 提供原始 branch，不能从 storage/RAM 规划中扣除。
-- MiniMax 当前推荐 SGLang、vLLM（链接 recipe 实际为 vLLM-Omni）、Diffusers 和 ComfyUI。本 MVP 仅应暴露 **SGLang** 与 **vLLM-Omni**。
+- MiniMax 当前推荐 SGLang、vLLM（链接 recipe 实际为 vLLM-Omni）、Diffusers 和 ComfyUI。本工具链暴露 **SGLang**、**vLLM-Omni** 与隔离的实验性 **ComfyUI** 路线；ComfyUI 的完整四类来源台账见 [comfyui-sources.md](comfyui-sources.md)。
 
 ## 证据注意事项
 

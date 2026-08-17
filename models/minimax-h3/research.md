@@ -5,3 +5,5 @@
 SGLang 是默认首选的规划候选，因为其官方 cookbook 提供了最清晰的精确 NVIDIA 拓扑证据。vLLM-Omni 也受支持，且是相关的 vLLM 音视频 pipeline；core vLLM 本身不被视为支持 H3。文档发布时间晚于观察到的稳定发行版，因此每个可执行计划都必须 pin 并 preflight 一个不可变、具备 H3 能力的 commit 或 image。
 
 MiniMax H3 Community License 在未另行授权的情况下将 EU、UK、Republic of Korea 和 USA 排除在 Applicable Territory 之外，并包含实质性的使用/分发条件。区域、预期用途、适用时的业务授权以及 license 接受均是强制计划门禁。完整来源台账、硬件证据和未解决事项请见 `../../research/minimax-h3/`。
+
+ComfyUI 路线另有机器可读的 `../../research/minimax-h3/comfyui-evidence.yaml`：它覆盖官方更新日志和固定核心源码、GitHub Issue/PR、PyPI `comfy-kitchen` 包文档以及 CSDN 技术实测。官方固定源码和包元数据可支撑版本事实；社区内容仅用于生成目标主机复测项。

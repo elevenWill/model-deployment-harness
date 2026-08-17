@@ -75,10 +75,55 @@ def _atomic_write_bytes(path: Path, value: bytes) -> None:
         raise
 
 
+def _comfyui_output_reference(
+    history: dict[str, Any], prompt_id: str, api: dict[str, Any]
+) -> dict[str, str]:
+    """Extract one MP4 output from the documented ComfyUI prompt-history response."""
+    entry = history.get(prompt_id)
+    if not isinstance(entry, dict) or not isinstance(entry.get("outputs"), dict):
+        raise HarnessError("ComfyUI history 尚未包含带 outputs 的已完成任务")
+    item_keys = set(api.get("output_item_keys", ("gifs", "videos")))
+    extension = str(api.get("output_extension", ".mp4")).lower()
+    candidates: list[dict[str, str]] = []
+    for node in entry["outputs"].values():
+        if not isinstance(node, dict):
+            continue
+        for item_key in item_keys:
+            values = node.get(item_key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if not isinstance(value, dict):
+                    continue
+                filename = value.get("filename")
+                subfolder = value.get("subfolder", "")
+                output_type = value.get("type", "output")
+                if (
+                    isinstance(filename, str)
+                    and filename.lower().endswith(extension)
+                    and isinstance(subfolder, str)
+                    and isinstance(output_type, str)
+                ):
+                    candidates.append(
+                        {"filename": filename, "subfolder": subfolder, "type": output_type}
+                    )
+    if len(candidates) != 1:
+        raise HarnessError("ComfyUI 已完成工作流必须恰好产出一个 MP4；请使用已审核的单输出工作流")
+    return candidates[0]
+
+
 def _run_inference_unrecorded(
-    plan: dict[str, Any], recipe: dict[str, Any], endpoint: str, payload_path: Path,
-    output_path: Path, response_path: Path, proof_path: Path, *, timeout: float = 1800,
-    poll_interval: float = 2, opener: OpenUrl = urllib.request.urlopen,
+    plan: dict[str, Any],
+    recipe: dict[str, Any],
+    endpoint: str,
+    payload_path: Path,
+    output_path: Path,
+    response_path: Path,
+    proof_path: Path,
+    *,
+    timeout: float = 1800,
+    poll_interval: float = 2,
+    opener: OpenUrl = urllib.request.urlopen,
 ) -> dict[str, Any]:
     """向已审核端点提交、轮询、下载并记录一次真实推理。"""
     validate_instance(plan, "deployment-plan.schema.json")
@@ -104,17 +149,31 @@ def _run_inference_unrecorded(
     origin = _checked_endpoint(endpoint, plan)
     submitted_at = _now()
     submit = urllib.request.Request(
-        urljoin(origin, api["submit_path"].lstrip("/")), data=payload_bytes,
-        headers={"Content-Type": "application/json"}, method="POST",
+        urljoin(origin, api["submit_path"].lstrip("/")),
+        data=payload_bytes,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
     initial = _json_response(opener, submit, min(timeout, 60))
-    job_id = str(initial.get("id", ""))
+    protocol = api.get("protocol", "async_job")
+    job_id = str(initial.get("prompt_id" if protocol == "comfyui_prompt_history" else "id", ""))
     if not job_id:
         raise HarnessError("模型 API 提交响应未包含任务 ID")
 
     deadline = time.monotonic() + timeout
     final = initial
-    while str(final.get("status", "")).upper() not in {"COMPLETED", "FAILED"}:
+    comfy_output: dict[str, str] | None = None
+    while True:
+        if protocol == "comfyui_prompt_history":
+            completed_history = isinstance(final.get(job_id), dict) and isinstance(
+                final[job_id].get("outputs"), dict
+            )
+            if completed_history:
+                comfy_output = _comfyui_output_reference(final, job_id, api)
+                final = {"id": job_id, "status": "COMPLETED", "history": final}
+                break
+        elif str(final.get("status", "")).upper() in {"COMPLETED", "FAILED"}:
+            break
         if time.monotonic() >= deadline:
             raise HarnessError("模型推理超时")
         if poll_interval:
@@ -125,12 +184,20 @@ def _run_inference_unrecorded(
             urllib.request.Request(urljoin(origin, status_path.lstrip("/")), method="GET"),
             min(max(deadline - time.monotonic(), 1), 60),
         )
-        if str(final.get("id", "")) != job_id:
+        if protocol != "comfyui_prompt_history" and str(final.get("id", "")) != job_id:
             raise HarnessError("模型 API 状态响应变更了任务 ID")
     if str(final.get("status", "")).upper() != "COMPLETED":
         raise HarnessError("模型推理任务失败")
 
-    content_path = api["content_path_template"].format(id=quote(job_id, safe=""))
+    if protocol == "comfyui_prompt_history":
+        assert comfy_output is not None
+        content_path = api["content_path_template"].format(
+            filename=quote(comfy_output["filename"], safe=""),
+            subfolder=quote(comfy_output["subfolder"], safe="/"),
+            type=quote(comfy_output["type"], safe=""),
+        )
+    else:
+        content_path = api["content_path_template"].format(id=quote(job_id, safe=""))
     with opener(
         urllib.request.Request(urljoin(origin, content_path.lstrip("/")), method="GET"),
         timeout=min(max(deadline - time.monotonic(), 1), 300),
@@ -147,23 +214,29 @@ def _run_inference_unrecorded(
         "plan_sha256": plan["review"]["plan_sha256"],
         "endpoint": endpoint.rstrip("/"),
         "request": {
-            "method": "POST", "path": api["submit_path"],
+            "method": "POST",
+            "path": api["submit_path"],
             "payload": {
-                "path": str(payload_path), "sha256": file_sha256(payload_path),
+                "path": str(payload_path),
+                "sha256": file_sha256(payload_path),
                 "media_type": "application/json",
             },
             "submitted_at": submitted_at,
         },
         "job": {
-            "job_id": job_id, "status": "COMPLETED", "completed_at": _now(),
+            "job_id": job_id,
+            "status": "COMPLETED",
+            "completed_at": _now(),
             "response": {
-                "path": str(response_path), "sha256": file_sha256(response_path),
+                "path": str(response_path),
+                "sha256": file_sha256(response_path),
                 "media_type": "application/json",
             },
             "runtime_error": None,
         },
         "output": {
-            "path": str(output_path), "sha256": file_sha256(output_path),
+            "path": str(output_path),
+            "sha256": file_sha256(output_path),
             "media_type": "video/mp4",
         },
     }
@@ -173,9 +246,17 @@ def _run_inference_unrecorded(
 
 
 def run_inference(
-    plan: dict[str, Any], recipe: dict[str, Any], endpoint: str, payload_path: Path,
-    output_path: Path, response_path: Path, proof_path: Path, *, timeout: float = 1800,
-    poll_interval: float = 2, opener: OpenUrl = urllib.request.urlopen,
+    plan: dict[str, Any],
+    recipe: dict[str, Any],
+    endpoint: str,
+    payload_path: Path,
+    output_path: Path,
+    response_path: Path,
+    proof_path: Path,
+    *,
+    timeout: float = 1800,
+    poll_interval: float = 2,
+    opener: OpenUrl = urllib.request.urlopen,
     archive: DeploymentArchive | None = None,
 ) -> dict[str, Any]:
     """执行真实推理，并把成功或失败尝试自动写入部署档案。"""
@@ -248,9 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         plan = load_document(args.plan)
-        expected_recipe = (
-            ROOT / plan["verification"]["recipe_ref"]
-        ).resolve()
+        expected_recipe = (ROOT / plan["verification"]["recipe_ref"]).resolve()
         model_root = (ROOT / "models").resolve()
         if (
             not expected_recipe.is_relative_to(model_root)
@@ -258,8 +337,13 @@ def main(argv: list[str] | None = None) -> int:
         ):
             raise HarnessError("--recipe 与已审核计划的 recipe_ref 不一致")
         run_inference(
-            plan, load_document(args.recipe), args.endpoint,
-            args.request_payload, args.media_output, args.response_output, args.proof_output,
+            plan,
+            load_document(args.recipe),
+            args.endpoint,
+            args.request_payload,
+            args.media_output,
+            args.response_output,
+            args.proof_output,
             archive=DeploymentArchive(plan["deployment_id"]),
         )
         print(f"COMPLETED: {args.proof_output}")

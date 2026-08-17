@@ -9,7 +9,7 @@ import yaml
 from scripts._common import ROOT, HarnessError, validate_instance
 from scripts.deployment_archive import DeploymentArchive
 from scripts.run_inference import run_inference
-from tests.test_remote_exec import ready_plan
+from tests.test_remote_exec import ready_comfyui_plan, ready_plan
 
 
 class FakeResponse:
@@ -47,14 +47,61 @@ def test_runner_submits_polls_downloads_and_generates_proof(tmp_path: Path) -> N
     proof_path = tmp_path / "proof.json"
     recipe = yaml.safe_load((ROOT / "models/minimax-h3/verify.yaml").read_text())
     proof = run_inference(
-        ready_plan(), recipe, "http://127.0.0.1:30011", payload, output, response,
-        proof_path, poll_interval=0, opener=opener,
+        ready_plan(),
+        recipe,
+        "http://127.0.0.1:30011",
+        payload,
+        output,
+        response,
+        proof_path,
+        poll_interval=0,
+        opener=opener,
     )
     validate_instance(proof, "inference-proof.schema.json")
     assert output.read_bytes() == b"actual-media-bytes"
     assert [item[1] for item in calls] == ["POST", "GET", "GET"]
     assert calls[0][0].endswith("/v1/videos")
     assert calls[2][0].endswith("/v1/videos/job-1/content")
+
+
+def test_runner_supports_comfyui_prompt_history_and_mp4_view(tmp_path: Path) -> None:
+    calls = []
+    responses = iter(
+        [
+            FakeResponse(b'{"prompt_id":"prompt-1","number":1}'),
+            FakeResponse(
+                b'{"prompt-1":{"outputs":{"42":{"gifs":[{"filename":"h3.mp4","subfolder":"","type":"output"}]}}}}'
+            ),
+            FakeResponse(b"actual-comfy-media"),
+        ]
+    )
+
+    def opener(request, **kwargs):
+        calls.append((request.full_url, request.get_method(), kwargs))
+        return next(responses)
+
+    payload = tmp_path / "workflow.json"
+    payload.write_text(json.dumps({"prompt": {"42": {"class_type": "SaveVideo"}}}))
+    output = tmp_path / "output.mp4"
+    response = tmp_path / "history.json"
+    proof_path = tmp_path / "proof.json"
+    recipe = yaml.safe_load((ROOT / "models/minimax-h3/verify-comfyui.yaml").read_text())
+    proof = run_inference(
+        ready_comfyui_plan(),
+        recipe,
+        "http://127.0.0.1:8188",
+        payload,
+        output,
+        response,
+        proof_path,
+        poll_interval=0,
+        opener=opener,
+    )
+    assert proof["job"]["job_id"] == "prompt-1"
+    assert [item[1] for item in calls] == ["POST", "GET", "GET"]
+    assert calls[0][0].endswith("/prompt")
+    assert calls[1][0].endswith("/history/prompt-1")
+    assert calls[2][0].endswith("/view?filename=h3.mp4&subfolder=&type=output")
 
 
 def test_successful_inference_is_automatically_added_to_archive(tmp_path: Path) -> None:
@@ -112,9 +159,7 @@ def test_failed_inference_attempt_is_automatically_added_to_archive(tmp_path: Pa
             tmp_path / "response.json",
             tmp_path / "proof.json",
             poll_interval=0,
-            opener=lambda *_args, **_kwargs: FakeResponse(
-                b'{"id":"job-1","status":"FAILED"}'
-            ),
+            opener=lambda *_args, **_kwargs: FakeResponse(b'{"id":"job-1","status":"FAILED"}'),
             archive=archive,
         )
 
@@ -138,7 +183,12 @@ def test_runner_rejects_unreviewed_recipe_before_http(tmp_path: Path) -> None:
     }
     with pytest.raises(HarnessError, match="已审核配方"):
         run_inference(
-            ready_plan(), fake_recipe, "http://127.0.0.1:30011", payload,
-            tmp_path / "out.mp4", tmp_path / "response.json", tmp_path / "proof.json",
+            ready_plan(),
+            fake_recipe,
+            "http://127.0.0.1:30011",
+            payload,
+            tmp_path / "out.mp4",
+            tmp_path / "response.json",
+            tmp_path / "proof.json",
             opener=lambda *_args, **_kwargs: pytest.fail("HTTP must not be called"),
         )

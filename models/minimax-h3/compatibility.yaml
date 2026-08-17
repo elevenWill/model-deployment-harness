@@ -2,6 +2,18 @@ schema_version: "1.0"
 model_id: minimax-h3
 scope: 上游已观察到的精确运行配置；并非通用最低要求。
 profiles:
+  - id: comfyui-1xrtx3090-int8-convrot-experimental
+    framework: comfyui
+    gpu: {model: RTX 3090, count: 1, memory_gib_each: 24}
+    host_ram: {minimum_available_gib: 60}
+    strategy: isolated_comfyui_pruned_int8_convrot_low_vram
+    confidence: LOW
+    evidence: COMFY-MODELSCOPE
+    status: EXPERIMENTAL
+    limits:
+      - 不是上游已验证的 H3 最低硬件配置；不得作为兼容性或稳定性承诺。
+      - 仅允许单并发、768 short-edge、4 秒 FL2VA 冒烟；Ref2VA 需单独的已获授权本地参考输入。
+      - 必须在 L5/L6 通过后才可报告 VERIFIED；任何 OOM、驱动不兼容或工作流节点失败均停止且不影响其他服务。
   - id: sglang-4xh200-resident
     framework: sglang
     gpu: {model: H200, count: 4, memory_gib_each: 141}

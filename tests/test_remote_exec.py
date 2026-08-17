@@ -10,6 +10,7 @@ from scripts.probe_host import CommandResult
 from scripts.remote_exec import (
     ExecutionBlocked,
     archive_reviewed_lifecycle,
+    authorize_execution,
     execute_plan,
     validate_executable_plan,
 )
@@ -238,6 +239,189 @@ def observed_host():
     }
 
 
+def ready_comfyui_plan():
+    plan = ready_plan()
+    install_root = "/opt/h3"
+    runtime_root = f"{install_root}/ComfyUI"
+    model_root = f"{install_root}/model"
+    venv_python = f"{install_root}/.venv/bin/python"
+    bootstrap_uv = "/opt/toolchain/bin/uv"
+    bootstrap_python = "/opt/toolchain/python/bin/python3.11"
+    revision = "0d80858061b511bd38c8cef4c235ef8e01040822"
+    plan["target"] = {
+        "host_id": "knode25",
+        "gpu_ids": [0],
+        "install_root": install_root,
+        "model_root": model_root,
+    }
+    plan["model"]["variant"] = "both"
+    plan["framework"] = {
+        "name": "comfyui",
+        "version": revision,
+        "recipe_ref": "models/minimax-h3/recipes/comfyui.yaml",
+        "runtime_artifact": {
+            "kind": "source_checkout",
+            "location": runtime_root,
+            "revision": revision,
+            "probe_command": [
+                "git",
+                "-C",
+                runtime_root,
+                "rev-parse",
+                "HEAD",
+            ],
+            "executable": venv_python,
+        },
+        "rationale": "isolated experimental ComfyUI service",
+        "evidence_ids": ["ev-1"],
+    }
+    plan["compatibility"] = {
+        "profile_id": "comfyui-1xrtx3090-int8-convrot-experimental",
+        "required_cuda": "12.6",
+    }
+    plan["environment"] = {
+        "strategy": "venv",
+        "isolated": True,
+        "rationale": "preserve host",
+        "bootstrap_uv": bootstrap_uv,
+        "bootstrap_python": bootstrap_python,
+    }
+    plan["service"] = {"mode": "managed_service", "bind_host": "0.0.0.0", "port": 8188}
+    model_files = [
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+    ]
+    commands = [
+        ("bootstrap-uv", "inspect", ["test", "-x", bootstrap_uv]),
+        ("bootstrap-python", "inspect", ["test", "-x", bootstrap_python]),
+        ("systemd-ready", "inspect", ["systemctl", "--user", "is-system-running"]),
+        (
+            "clone",
+            "clone_source_checkout",
+            [
+                "git",
+                "clone",
+                "--no-checkout",
+                "https://github.com/Comfy-Org/ComfyUI.git",
+                runtime_root,
+            ],
+        ),
+        (
+            "checkout",
+            "checkout_source_revision",
+            ["git", "-C", runtime_root, "checkout", "--detach", revision],
+        ),
+        (
+            "venv",
+            "create_isolated_venv",
+            [bootstrap_uv, "venv", "--python", bootstrap_python, f"{install_root}/.venv"],
+        ),
+        (
+            "deps",
+            "install_isolated_dependencies",
+            [
+                bootstrap_uv,
+                "pip",
+                "install",
+                "--python",
+                venv_python,
+                "-r",
+                f"{runtime_root}/requirements.txt",
+                "modelscope==1.31.0",
+            ],
+        ),
+        (
+            "download",
+            "download_model",
+            [
+                f"{install_root}/.venv/bin/modelscope",
+                "download",
+                "--model",
+                "Comfy-Org/MiniMax-H3",
+                "--revision",
+                "a" * 40,
+                "--local_dir",
+                model_root,
+                *sum((["--include", item] for item in model_files), []),
+            ],
+        ),
+        (
+            "models-link",
+            "create_service_config",
+            ["ln", "-s", model_root, f"{install_root}/models"],
+        ),
+        (
+            "start",
+            "start_own_service",
+            [
+                "systemd-run",
+                "--user",
+                "--unit=dep-1",
+                "--collect",
+                f"--property=WorkingDirectory={runtime_root}",
+                "--setenv=CUDA_VISIBLE_DEVICES=0",
+                venv_python,
+                f"{runtime_root}/main.py",
+                "--listen",
+                "0.0.0.0",
+                "--port",
+                "8188",
+                "--base-directory",
+                install_root,
+                "--lowvram",
+                "--disable-auto-launch",
+            ],
+        ),
+    ]
+    plan["steps"] = [
+        {
+            "step_id": step_id,
+            "sequence": index,
+            "name": step_id,
+            "action": action,
+            "action_class": "READ_ONLY" if action == "inspect" else "PLAN_ALLOWED_WRITE",
+            "command": command,
+            "depends_on": [] if index == 1 else [commands[index - 2][0]],
+            "success_criteria": ["fixture"],
+            "rollback_step_ids": [],
+        }
+        for index, (step_id, action, command) in enumerate(commands, start=1)
+    ]
+    plan["steps"][-1]["depends_on"].append("systemd-ready")
+    venv_step = next(step for step in plan["steps"] if step["step_id"] == "venv")
+    venv_step["depends_on"] = ["checkout", "bootstrap-uv", "bootstrap-python"]
+    plan["required_changes"] = [
+        {
+            "description": step["name"],
+            "action_class": "PLAN_ALLOWED_WRITE",
+            "step_ids": [step["step_id"]],
+        }
+        for step in plan["steps"]
+    ]
+    plan["verification"]["recipe_ref"] = "models/minimax-h3/verify-comfyui.yaml"
+    plan["rollback"] = {
+        "trigger_conditions": ["start or verification failure"],
+        "steps": [
+            {
+                "step_id": "stop-comfyui",
+                "sequence": 1,
+                "name": "stop owned unit",
+                "action": "stop_own_service",
+                "action_class": "PLAN_ALLOWED_WRITE",
+                "command": ["systemctl", "--user", "stop", "dep-1.service"],
+                "success_criteria": ["owned unit stopped"],
+                "rollback_step_ids": [],
+            }
+        ],
+        "preserve_evidence": True,
+    }
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    return plan
+
+
 class FakeTransport:
     def __init__(self, returncode=0, raised=None):
         self.calls = []
@@ -295,6 +479,44 @@ def test_ready_hash_validated_and_exact_argv_executed(tmp_path):
     ]
 
 
+def test_comfyui_plan_only_allows_exact_modelscope_assets_and_isolated_service() -> None:
+    plan = ready_comfyui_plan()
+    validate_executable_plan(plan)
+    download = next(step for step in plan["steps"] if step["action"] == "download_model")
+    include = download["command"].index("--include")
+    download["command"][include + 1] = "diffusion_models/minimax_h3_fl2va_bf16.safetensors"
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    with pytest.raises(ExecutionBlocked, match="ModelScope"):
+        validate_executable_plan(plan)
+
+
+def test_comfyui_execution_blocks_without_reviewed_runtime_paths() -> None:
+    plan = ready_comfyui_plan()
+    request = deployment_request()
+    request["target"]["install_root"] = "/opt/h3"
+    request["target"]["model_root"] = "/opt/h3/model"
+    request["model"]["variant"] = "both"
+    request["framework_preference"] = "comfyui"
+    request["service"] = {"mode": "managed_service", "bind_host": "0.0.0.0", "port": 8188}
+    del plan["environment"]["bootstrap_uv"]
+    with pytest.raises(ExecutionBlocked, match="独立 uv 与 Python 路径"):
+        authorize_execution(plan, request, observed_host())
+
+
+def test_comfyui_uses_reviewed_runtime_when_ssh_path_hides_uv() -> None:
+    plan = ready_comfyui_plan()
+    request = deployment_request()
+    request["target"]["install_root"] = "/opt/h3"
+    request["target"]["model_root"] = "/opt/h3/model"
+    request["model"]["variant"] = "both"
+    request["framework_preference"] = "comfyui"
+    request["service"] = {"mode": "managed_service", "bind_host": "0.0.0.0", "port": 8188}
+    host = observed_host()
+    host["software"]["uv_version"] = "bash: uv: command not found"
+    host["software"]["python"] = [{"executable": "python3", "version": "Python 3.8.10"}]
+    assert authorize_execution(plan, request, host).status == "PASS"
+
+
 def test_execute_plan_automatically_records_redacted_step_results(tmp_path):
     plan = ready_plan()
     archive = DeploymentArchive(
@@ -328,9 +550,7 @@ def test_execute_plan_automatically_records_redacted_step_results(tmp_path):
     ]
     assert document["steps"][0]["started_at"] <= document["steps"][0]["completed_at"]
     deployment_record_path = tmp_path / "deployments" / "dep-1.json"
-    deployment_record = json.loads(
-        deployment_record_path.read_text(encoding="utf-8")
-    )
+    deployment_record = json.loads(deployment_record_path.read_text(encoding="utf-8"))
     assert deployment_record["deployment_status"] == "STARTED"
     assert deployment_record["known_state"]["expected_service_state"] == "RUNNING"
     assert deployment_record["framework"]["name"] == "sglang"
@@ -356,9 +576,7 @@ def test_preflight_exception_is_automatically_recorded_as_failed_deployment(tmp_
             archive=archive,
         )
 
-    record = json.loads(
-        (tmp_path / "deployments" / "dep-1.json").read_text(encoding="utf-8")
-    )
+    record = json.loads((tmp_path / "deployments" / "dep-1.json").read_text(encoding="utf-8"))
     assert record["deployment_status"] == "FAILED"
     assert record["incident_refs"] == ["incident-dep-1-0001"]
 
@@ -530,8 +748,16 @@ def test_container_launch_binds_exact_gpu_ids() -> None:
         action="start_own_service",
         action_class="PLAN_ALLOWED_WRITE",
         command=[
-            "docker", "run", "--name", "dep-1", "--gpus", "device=0",
-            "--publish", "127.0.0.1:30011:30011", "--detach", image,
+            "docker",
+            "run",
+            "--name",
+            "dep-1",
+            "--gpus",
+            "device=0",
+            "--publish",
+            "127.0.0.1:30011:30011",
+            "--detach",
+            image,
         ],
     )
     plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)

@@ -53,7 +53,7 @@
         },
         "framework_preference": {
           "type": "string",
-          "enum": ["sglang", "vllm-omni"]
+          "enum": ["sglang", "vllm-omni", "comfyui"]
         },
         "service": {
           "type": "object",

@@ -1,0 +1,93 @@
+schema_version: "1.0"
+model_id: minimax-h3
+framework:
+  name: comfyui
+  component: ComfyUI
+  source: https://github.com/Comfy-Org/ComfyUI.git
+  documentation_commit: 0d80858061b511bd38c8cef4c235ef8e01040822
+  deployment_pin: 0d80858061b511bd38c8cef4c235ef8e01040822
+  pin_required_before_ready: true
+
+research:
+  evidence_catalog: ../../../research/minimax-h3/comfyui-evidence.yaml
+  required_source_families:
+    - comfyui_official
+    - github_issue_pr
+    - pypi_official_package
+    - csdn_technical_validation
+  critical_decision_tiers: [S, A]
+  community_sources_require_target_reproduction: true
+
+runtime:
+  source_checkout_subdirectory: ComfyUI
+  isolated_venv_subdirectory: .venv
+  dependency_command: uv pip install --python {install_root}/.venv/bin/python -r {runtime_root}/requirements.txt modelscope==1.31.0
+  no_system_python_changes: true
+  execution_precondition:
+    requires_preinstalled_uv: true
+    minimum_python: "3.10"
+    policy: 未提供受批准的 uv 和兼容 Python 时阻止执行；本 recipe 不安装或修改系统 Python、pip 或 uv。
+
+modelscope_download:
+  repository: Comfy-Org/MiniMax-H3
+  revision_required: true
+  destination_semantics: model_root
+  required_quantization: pruned_int8_convrot
+  variants:
+    fl2va:
+      include:
+        - diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+        - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        - vae/minimax_h3_audio_vae_fp32.safetensors
+        - vae/minimax_h3_video_vae_fp16.safetensors
+    ref2va:
+      include:
+        - diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+        - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        - vae/minimax_h3_audio_vae_fp32.safetensors
+        - vae/minimax_h3_video_vae_fp16.safetensors
+    both:
+      include:
+        - diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+        - diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+        - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        - vae/minimax_h3_audio_vae_fp32.safetensors
+        - vae/minimax_h3_video_vae_fp16.safetensors
+
+model_path_semantics:
+  model_root_is_separate_from_runtime: true
+  integration: create_isolated_models_symlink_and_use_base_directory
+  symlink: "{install_root}/models -> {model_root}"
+  warning: 不得下载到既有 ComfyUI 或其他服务的 models 目录；不得覆盖已有路径。
+
+launch_template:
+  argv:
+    - "{venv_python}"
+    - "{runtime_root}/main.py"
+    - --listen
+    - "{bind_host}"
+    - --port
+    - "{port}"
+    - --base-directory
+    - "{install_root}"
+    - --lowvram
+    - --disable-auto-launch
+  service_manager: systemd-run --user
+  user_systemd_preflight: systemctl --user is-system-running
+  rollback: systemctl --user stop {deployment_id}.service
+  required_explicit_values: [variant, gpu_ids, bind_host, port, topology_profile, modelscope_revision]
+  network_note: ComfyUI 原生 API 无认证；仅可监听已批准的隔离内网地址，禁止在本配方中修改防火墙或暴露互联网。
+
+constraints:
+  profile: comfyui-1xrtx3090-int8-convrot-experimental
+  experimental: true
+  concurrency: 1
+  smoke_test: FL2VA only, 768 short-edge, 4 seconds
+  ref2va_requires_authorized_reference_input: true
+  stop_on_oom_or_node_error: true
+  no_compatibility_claim_before_l5_l6: true
+
+api:
+  submit: POST /prompt
+  history: GET /history/{prompt_id}
+  content: GET /view?filename={filename}&subfolder={subfolder}&type={type}

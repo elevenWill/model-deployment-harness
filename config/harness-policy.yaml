@@ -75,10 +75,14 @@ remote_execution:
   plan_allowed_writes:
     - create_target_directory
     - create_isolated_venv
+    - clone_source_checkout
+    - checkout_source_revision
+    - install_isolated_dependencies
     - pull_container
     - download_model
     - create_service_config
     - start_own_service
+    - stop_own_service
   protected_actions:
     approval: manual_outside_mvp
     actions:
@@ -103,13 +107,17 @@ remote_execution:
     stale_lock_removal: forbidden
   command_policy:
     shell_interpreters_forbidden: [sh, bash, zsh, dash, fish, csh, tcsh]
-    inspect: [test]
+    inspect: [test, systemctl]
     create_target_directory: [mkdir]
     create_isolated_venv: [python, python3, uv]
     pull_container: [docker, podman]
-    download_model: [hf]
-    create_service_config: [install, cp]
-    start_own_service: [sglang, vllm, docker, podman]
+    clone_source_checkout: [git]
+    checkout_source_revision: [git]
+    install_isolated_dependencies: [uv]
+    download_model: [hf, modelscope]
+    create_service_config: [install, cp, ln]
+    start_own_service: [sglang, vllm, docker, podman, systemd-run]
+    stop_own_service: [systemctl]
 
 license_gate:
   required_before_ready: true

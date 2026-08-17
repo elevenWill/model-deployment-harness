@@ -16,6 +16,7 @@
         "url": {"type": "string", "format": "uri"},
         "authority_tier": {"type": "string", "enum": ["S", "A", "B", "C", "D"]},
         "publisher": {"type": "string", "minLength": 1},
+        "source_family": {"type": "string", "enum": ["comfyui_official", "github_issue_pr", "pypi_official_package", "csdn_technical_validation", "model_vendor_official", "framework_vendor_official", "other"]},
         "version": {"type": "string", "minLength": 1},
         "published_at": {"type": "string", "format": "date-time"}
       }

@@ -26,12 +26,49 @@ supported_frameworks:
   - name: vllm-omni
     recipe: recipes/vllm-omni.yaml
     evidence: VLO-REC
+  - name: comfyui
+    recipe: recipes/comfyui.yaml
+    evidence: COMFY-MODELSCOPE
 
 download:
   mechanism: huggingface_snapshot
   revision_required: true
   authentication: probe_then_environment_HF_TOKEN
   root_files: [model_index.json]
+  supported_sources:
+    modelscope:
+      repository: Comfy-Org/MiniMax-H3
+      revision_required: true
+      command: modelscope download
+      note: 仅用于 ComfyUI 的重新打包量化权重；READY 计划必须记录 40 位不可变 revision。
+
+comfyui_assets:
+  source: Comfy-Org/MiniMax-H3
+  layout: model_root_matches_comfyui_models_layout
+  shared_files:
+    - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+    - vae/minimax_h3_audio_vae_fp32.safetensors
+    - vae/minimax_h3_video_vae_fp16.safetensors
+  variants:
+    fl2va:
+      files:
+        - diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+        - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        - vae/minimax_h3_audio_vae_fp32.safetensors
+        - vae/minimax_h3_video_vae_fp16.safetensors
+    ref2va:
+      files:
+        - diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+        - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        - vae/minimax_h3_audio_vae_fp32.safetensors
+        - vae/minimax_h3_video_vae_fp16.safetensors
+    both:
+      files:
+        - diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors
+        - diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+        - text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+        - vae/minimax_h3_audio_vae_fp32.safetensors
+        - vae/minimax_h3_video_vae_fp16.safetensors
 
 local_output:
   short_edge_pixels: 768
@@ -53,6 +90,8 @@ license:
 verification: verify.yaml
 research:
   official_sources: ../../research/minimax-h3/official-sources.md
+  comfyui_evidence: ../../research/minimax-h3/comfyui-evidence.yaml
+  comfyui_sources: ../../research/minimax-h3/comfyui-sources.md
   deployment_options: ../../research/minimax-h3/deployment-options.md
   hardware_notes: ../../research/minimax-h3/hardware-notes.md
   open_questions: ../../research/minimax-h3/open-questions.md

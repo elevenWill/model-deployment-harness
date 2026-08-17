@@ -1,0 +1,120 @@
+schema_version: "1.0"
+retrieved_at: "2026-08-17T19:30:00+08:00"
+evidence:
+  - evidence_id: COMFY-CHANGELOG
+    source:
+      title: ComfyUI 官方更新日志
+      url: https://docs.comfy.org/changelog
+      authority_tier: A
+      publisher: Comfy-Org
+      source_family: comfyui_official
+      version: v0.33.1-observed-2026-08-17
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: 官方日志记录了 MiniMax-H3 原生支持，以及后续的 int8_convrot VAE、comfy-kitchen attention、H3 峰值内存和音频修复。
+    applies_to: [comfyui, minimax-h3, release-tracking]
+    confidence: HIGH
+    officially_verified: true
+    inference: false
+    limitations:
+      - 滚动更新日志会变化；执行计划仍须固定具体 Release 或 commit。
+
+  - evidence_id: COMFY-CORE-H3
+    source:
+      title: ComfyUI MiniMax-H3 核心节点实现
+      url: https://github.com/Comfy-Org/ComfyUI/blob/0d80858061b511bd38c8cef4c235ef8e01040822/comfy_extras/nodes_minimax_h3.py
+      authority_tier: A
+      publisher: Comfy-Org
+      source_family: comfyui_official
+      version: 0d80858061b511bd38c8cef4c235ef8e01040822
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: 固定 commit 中包含 MiniMax-H3 节点入口；同一 commit 下的 comfy/ldm/minimax、quant_ops、model_management 与 execution.py 用于核对模型、量化、显存和执行逻辑。
+    applies_to: [comfyui, minimax-h3, core-logic]
+    confidence: HIGH
+    officially_verified: true
+    inference: false
+
+  - evidence_id: COMFY-REQUIREMENTS-KITCHEN
+    source:
+      title: ComfyUI 固定 commit 的依赖清单
+      url: https://github.com/Comfy-Org/ComfyUI/blob/0d80858061b511bd38c8cef4c235ef8e01040822/requirements.txt
+      authority_tier: A
+      publisher: Comfy-Org
+      source_family: comfyui_official
+      version: 0d80858061b511bd38c8cef4c235ef8e01040822
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: 该 ComfyUI commit 将 comfy-kitchen 精确固定为 0.2.31。
+    applies_to: [comfyui, comfy-kitchen, dependency-pin]
+    confidence: HIGH
+    officially_verified: true
+    inference: false
+
+  - evidence_id: COMFY-PR-15479
+    source:
+      title: Implement comfy kitchen attention
+      url: https://github.com/Comfy-Org/ComfyUI/pull/15479
+      authority_tier: A
+      publisher: Comfy-Org
+      source_family: github_issue_pr
+      version: bf4c9a08fc854df6d3b2bef1b92b509e2ef2d2c9
+      published_at: "2026-08-11T05:03:09Z"
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: 该 PR 已合并，提供 ComfyUI 对 comfy-kitchen attention 的上游实现记录。
+    applies_to: [comfyui, comfy-kitchen, attention]
+    confidence: HIGH
+    officially_verified: true
+    inference: false
+
+  - evidence_id: COMFY-ISSUE-15419
+    source:
+      title: RTX 3090 上 MiniMax-H3 噪声输出排查
+      url: https://github.com/Comfy-Org/ComfyUI/issues/15419
+      authority_tier: B
+      publisher: Comfy-Org GitHub community
+      source_family: github_issue_pr
+      version: observed-2026-08-17
+      published_at: "2026-08-08T05:02:07Z"
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: Issue 包含协作者关于 cu130 的建议，以及社区在 RTX 3090、ComfyUI 0.31.0、comfy-kitchen 0.2.28 下复现成功并定位损坏权重的报告。
+    applies_to: [comfyui, minimax-h3, rtx-3090, troubleshooting]
+    confidence: MEDIUM
+    officially_verified: false
+    inference: false
+    limitations:
+      - 这是开放 Issue 中的特定环境报告，不能替代目标主机复现。
+
+  - evidence_id: COMFY-KITCHEN-PYPI
+    source:
+      title: comfy-kitchen PyPI 官方包页面
+      url: https://pypi.org/project/comfy-kitchen/0.2.31/
+      authority_tier: A
+      publisher: Python Package Index / Comfy-Org
+      source_family: pypi_official_package
+      version: 0.2.31
+      published_at: "2026-08-13T02:11:41Z"
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: PyPI 元数据将 comfy-kitchen 描述为 ComfyUI 多计算后端快速内核库，要求 Python >=3.10，并链接 Comfy-Org/comfy-kitchen 官方仓库。
+    applies_to: [comfy-kitchen, package-metadata, wheel-availability]
+    confidence: HIGH
+    officially_verified: true
+    inference: false
+    limitations:
+      - 部署时还必须记录所选平台 wheel 的 SHA-256，不能只固定版本号。
+
+  - evidence_id: CSDN-H3-RTX5090
+    source:
+      title: Qwen3-VL-32B MiniMax-H3 INT8 ConvRot 在 RTX 5090 上的部署记录
+      url: https://blog.csdn.net/gitblog_00670/article/details/159141415
+      authority_tier: D
+      publisher: CSDN community
+      source_family: csdn_technical_validation
+      version: observed-2026-08-17
+      published_at: "2026-08-05T00:00:00Z"
+    retrieved_at: "2026-08-17T19:30:00+08:00"
+    claim: 文章报告了 RTX 5090、固定 ComfyUI commit、comfy-kitchen 0.2.26 与 PyTorch cu128 环境下的安装参数和显存观测。
+    applies_to: [comfyui, minimax-h3, rtx-5090, reproduction-lead]
+    confidence: LOW
+    officially_verified: false
+    inference: false
+    limitations:
+      - 缺少可独立审计的原始日志与产物哈希，且内容质量未知。
+      - 只能生成目标主机复测方案，不能支撑兼容性、性能或安装决策。

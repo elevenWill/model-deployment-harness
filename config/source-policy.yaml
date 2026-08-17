@@ -17,10 +17,35 @@ tiers:
     description: 博客、SEO 页面、社交媒体、转载与内容农场
     decision_use: prohibited_for_critical_decisions
 
+source_families:
+  comfyui_official:
+    description: ComfyUI 官方更新日志、GitHub Release 与固定 commit 的核心模块源码
+    default_tier: A
+    decision_use: primary_when_version_pinned
+    required_metadata: [version_or_commit, retrieved_at]
+  github_issue_pr:
+    description: Comfy-Org 仓库中的 Issue、PR、维护者回复与合并记录
+    default_tier: C
+    maintainer_confirmed_tier: B
+    merged_upstream_code_tier: A
+    decision_use: supplemental_unless_merged_and_pinned
+  pypi_official_package:
+    description: PyPI 上链接至 Comfy-Org 官方仓库的 comfy-kitchen 包元数据与发布文件
+    default_tier: A
+    decision_use: package_version_and_artifact_metadata
+    required_metadata: [package_version, official_project_url, wheel_hash_when_deployed]
+  csdn_technical_validation:
+    description: CSDN 上带硬件、软件版本、命令和输出的技术实测记录
+    default_tier: D
+    maximum_tier: C
+    decision_use: reproduction_leads_only
+    required_metadata: [hardware, software_versions, commands, observed_output]
+
 rules:
   deployment_decisions_require_tiers: [S, A]
   tier_B_cannot_be_sole_support_for_critical_decision: true
   tiers_C_D_may_generate_leads_only: true
+  community_measurements_require_local_reproduction: true
   conflicting_sources_prefer_higher_tier: true
   unresolved_same_tier_conflict_status: BLOCKED
   evidence_required_fields:

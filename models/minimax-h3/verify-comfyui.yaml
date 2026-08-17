@@ -1,0 +1,44 @@
+schema_version: "1.0"
+model_id: minimax-h3
+framework: comfyui
+required_levels: [L1_environment, L2_process, L3_port, L4_api, L5_real_inference, L6_output_validation]
+smoke_inference:
+  task: t2va
+  variant: fl2va
+  seed: fixed_and_recorded
+  duration_seconds: 4
+  short_edge_pixels: 768
+  user_prompt_required: true
+  workflow_contract:
+    submit_payload: {prompt: required, client_id: recommended}
+    approved_workflow_required: true
+    exact_one_mp4_output_required: true
+  ref2va:
+    requires_separate_authorized_reference_input: true
+    required_before_reporting_variant_verified: true
+inference_api:
+  protocol: comfyui_prompt_history
+  submit_paths: [/prompt]
+  submit_path: /prompt
+  status_path_template: /history/{id}
+  content_path_template: /view?filename={filename}&subfolder={subfolder}&type={type}
+  completed_history_requires_outputs: true
+  output_item_keys: [gifs, videos]
+  output_extension: .mp4
+  exactly_one_output: true
+output_validation:
+  container: mp4
+  non_empty: true
+  full_decode_command: [ffmpeg, -v, error, -i, "{output}", -f, "null", -]
+  probe_command: [ffprobe, -v, error, -show_streams, -show_format, -of, json, "{output}"]
+  video: {codec: h264, fps: 24}
+  audio: {codec: aac, sample_rate_hz: 32000, channels: 2}
+  duration_seconds: {minimum: 4, maximum: 15}
+  semantic_checks:
+    - 代表性帧并非空白或冻结画面
+    - 存在音频且并非明显静音
+    - 输出与经审核工作流、任务和提示词/参考输入相符
+verified_requires: [L5_real_inference, L6_output_validation]
+evidence_contracts:
+  inference_proof: schemas/inference-proof.schema.json
+  semantic_review: schemas/semantic-review.schema.json

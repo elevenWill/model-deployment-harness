@@ -71,8 +71,7 @@ def _resolved_repo_file(reference: str, expected_parent: Path) -> Path:
 
 def _immutable_version(value: str) -> bool:
     return bool(
-        re.fullmatch(r"[0-9a-fA-F]{7,40}", value)
-        or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", value)
+        re.fullmatch(r"[0-9a-fA-F]{7,40}", value) or re.fullmatch(r"sha256:[0-9a-fA-F]{64}", value)
     )
 
 
@@ -90,9 +89,7 @@ def _validate_lifecycle(plan: Mapping[str, Any]) -> None:
         path = Path(reference["path"])
         resolved = path.resolve() if path.is_absolute() else (ROOT / path).resolve()
         if not resolved.is_relative_to(ROOT.resolve()) or not resolved.is_file():
-            raise ExecutionBlocked(
-                f"生命周期制品缺失或位于仓库外：{reference['path']}"
-            )
+            raise ExecutionBlocked(f"生命周期制品缺失或位于仓库外：{reference['path']}")
         if file_sha256(resolved).lower() != reference["sha256"].lower():
             raise ExecutionBlocked(f"生命周期制品哈希不匹配：{reference['path']}")
         if resolved in seen_paths:
@@ -142,7 +139,7 @@ def _validate_lifecycle(plan: Mapping[str, Any]) -> None:
         raise ExecutionBlocked("计划审核源未引用计划草案哈希")
 
 
-def _validate_framework_evidence_and_recipe(plan: Mapping[str, Any]) -> None:
+def _validate_framework_evidence_and_recipe(plan: Mapping[str, Any]) -> dict[str, Any]:
     framework = plan["framework"]
     if not _immutable_version(framework["version"]):
         raise ExecutionBlocked("框架版本必须为不可变提交或镜像摘要")
@@ -162,9 +159,16 @@ def _validate_framework_evidence_and_recipe(plan: Mapping[str, Any]) -> None:
     if not _under_remote_root(runtime["location"], (plan["target"]["install_root"],)):
         raise ExecutionBlocked("框架运行时 checkout 越出 install_root")
     executable_name = {"sglang": "sglang", "vllm-omni": "vllm"}.get(framework["name"])
-    if executable_name is None:
+    if framework["name"] == "comfyui":
+        expected_executable = str(
+            PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/python"
+        )
+    elif executable_name is not None:
+        expected_executable = str(
+            PurePosixPath(runtime["location"]) / ".venv/bin" / executable_name
+        )
+    else:
         raise ExecutionBlocked("框架没有已实现的可执行文件绑定")
-    expected_executable = str(PurePosixPath(runtime["location"]) / ".venv/bin" / executable_name)
     if runtime["executable"] != expected_executable:
         raise ExecutionBlocked("框架可执行文件未绑定到已审核 checkout")
     evidence = {item["evidence_id"]: item for item in plan["evidence"]}
@@ -176,6 +180,32 @@ def _validate_framework_evidence_and_recipe(plan: Mapping[str, Any]) -> None:
             raise ExecutionBlocked("关键框架决策缺少 S/A 级证据")
         if item["confidence"] != "HIGH" or item["inference"]:
             raise ExecutionBlocked("关键框架证据必须具有高置信度且为直接证据")
+    return recipe
+
+
+def _model_manifest(plan: Mapping[str, Any]) -> dict[str, Any]:
+    manifest_path = _resolved_repo_file(plan["model"]["recipe_ref"], ROOT / "models")
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("model", {}).get("id") != plan["model"]["id"]:
+        raise ExecutionBlocked("模型清单 ID 与计划不一致")
+    return manifest
+
+
+def _comfy_bootstrap(plan: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the reviewed, user-owned uv/Python pair for an isolated ComfyUI venv."""
+    environment = plan["environment"]
+    uv_path = environment.get("bootstrap_uv")
+    python_path = environment.get("bootstrap_python")
+    if not isinstance(uv_path, str) or not isinstance(python_path, str):
+        raise ExecutionBlocked("ComfyUI 计划必须记录已观测的独立 uv 与 Python 路径")
+    if (
+        not PurePosixPath(uv_path).is_absolute()
+        or PurePosixPath(uv_path).name != "uv"
+        or not PurePosixPath(python_path).is_absolute()
+        or not PurePosixPath(python_path).name.startswith("python")
+    ):
+        raise ExecutionBlocked("ComfyUI 独立 uv/Python 路径无效")
+    return uv_path, python_path
 
 
 def _scope_authorizes(step: Mapping[str, Any]) -> bool:
@@ -205,7 +235,10 @@ def _argument_after(argv: Sequence[str], flag: str) -> str | None:
 
 
 def _validate_step_command(
-    step: Mapping[str, Any], plan: Mapping[str, Any], command_policy: Mapping[str, Any]
+    step: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    command_policy: Mapping[str, Any],
+    framework_recipe: Mapping[str, Any],
 ) -> None:
     argv = tuple(step["command"])
     if not argv or any("\x00" in value for value in argv):
@@ -215,16 +248,25 @@ def _validate_step_command(
         raise ExecutionBlocked(f"{step['step_id']} 禁止使用 shell 解释器")
     allowed = set(command_policy.get(step["action"], []))
     if executable not in allowed:
-        raise ExecutionBlocked(
-            f"命令可执行文件与声明动作 {step['action']} 不一致：{executable}"
-        )
+        raise ExecutionBlocked(f"命令可执行文件与声明动作 {step['action']} 不一致：{executable}")
     roots = (plan["target"]["install_root"], plan["target"]["model_root"])
     action = step["action"]
     if action == "inspect":
-        if len(argv) != 3 or argv[1] not in {"-d", "-e", "-f"} or not _under_remote_root(
-            argv[2], roots
+        if executable == "test":
+            comfy_bootstrap_paths: tuple[str, str] = ()
+            if plan["framework"]["name"] == "comfyui":
+                comfy_bootstrap_paths = _comfy_bootstrap(plan)
+            allowed_paths = (*roots, *comfy_bootstrap_paths)
+            if len(argv) != 3 or argv[1] not in {"-d", "-e", "-f", "-x"} or not any(
+                _under_remote_root(argv[2], (root,)) for root in allowed_paths
+            ):
+                raise ExecutionBlocked("计划 inspect 步骤仅限对目标根目录执行 test")
+        elif plan["framework"]["name"] != "comfyui" or argv != (
+            "systemctl",
+            "--user",
+            "is-system-running",
         ):
-            raise ExecutionBlocked("计划 inspect 步骤仅限对目标根目录执行 test")
+            raise ExecutionBlocked("仅 ComfyUI 可以使用精确的只读 user systemd 可用性检查")
     elif action == "create_target_directory":
         paths = [value for value in argv[1:] if not value.startswith("-")]
         if executable != "mkdir" or "-p" not in argv or not paths:
@@ -236,10 +278,49 @@ def _validate_step_command(
         valid_shape = (executable == "uv" and argv[1:2] == ("venv",)) or (
             executable in {"python", "python3"} and argv[1:3] == ("-m", "venv")
         )
+        if plan["framework"]["name"] == "comfyui":
+            uv_path, python_path = _comfy_bootstrap(plan)
+            valid_shape = argv == (uv_path, "venv", "--python", python_path, destination)
         if not valid_shape or not _under_remote_root(
             destination, (plan["target"]["install_root"],)
         ):
             raise ExecutionBlocked("隔离 venv 的命令/路径与声明动作不一致")
+    elif action == "clone_source_checkout":
+        runtime = plan["framework"]["runtime_artifact"]
+        expected = (
+            "git",
+            "clone",
+            "--no-checkout",
+            framework_recipe["framework"]["source"],
+            runtime["location"],
+        )
+        if argv != expected or not _under_remote_root(
+            runtime["location"], (plan["target"]["install_root"],)
+        ):
+            raise ExecutionBlocked("源码 clone 必须使用配方允许的精确来源和 runtime 目录")
+    elif action == "checkout_source_revision":
+        runtime = plan["framework"]["runtime_artifact"]
+        expected = ("git", "-C", runtime["location"], "checkout", "--detach", runtime["revision"])
+        if argv != expected:
+            raise ExecutionBlocked("源码 checkout 必须固定到已审核 runtime revision")
+    elif action == "install_isolated_dependencies":
+        runtime = plan["framework"]["runtime_artifact"]
+        venv_python = str(PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/python")
+        tool = _comfy_bootstrap(plan)[0] if plan["framework"]["name"] == "comfyui" else "uv"
+        expected = (
+            tool,
+            "pip",
+            "install",
+            "--python",
+            venv_python,
+            "-r",
+            str(PurePosixPath(runtime["location"]) / "requirements.txt"),
+            "modelscope==1.31.0",
+        )
+        if argv != expected:
+            raise ExecutionBlocked(
+                "隔离依赖安装必须使用配方固定的 uv、requirements 和 ModelScope 客户端"
+            )
     elif action == "pull_container":
         if (
             len(argv) != 3
@@ -249,23 +330,67 @@ def _validate_step_command(
             raise ExecutionBlocked("拉取容器必须使用不可变镜像摘要")
     elif action == "download_model":
         revision = _argument_after(argv, "--revision")
-        destination = _argument_after(argv, "--local-dir")
-        if argv[:2] != ("hf", "download") or not revision or not re.fullmatch(
-            r"[0-9a-fA-F]{40}", revision
-        ):
-            raise ExecutionBlocked("下载模型需要带 40 位十六进制修订版本的 hf download")
-        if destination is None or not _under_remote_root(
-            destination, (plan["target"]["model_root"],)
-        ):
-            raise ExecutionBlocked("模型下载目标越出 model_root")
-    elif action == "create_service_config":
-        non_options = [value for value in argv[1:] if not value.startswith("-")]
-        if len(non_options) < 2 or not all(
-            _under_remote_root(value, roots) for value in non_options[-2:]
-        ):
-            raise ExecutionBlocked(
-                "服务配置源/目标必须位于目标根目录下"
+        if executable == "hf":
+            destination = _argument_after(argv, "--local-dir")
+            if (
+                argv[:2] != ("hf", "download")
+                or not revision
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", revision)
+            ):
+                raise ExecutionBlocked("下载模型需要带 40 位十六进制修订版本的 hf download")
+            if destination is None or not _under_remote_root(
+                destination, (plan["target"]["model_root"],)
+            ):
+                raise ExecutionBlocked("模型下载目标越出 model_root")
+        elif executable == "modelscope":
+            manifest = _model_manifest(plan)
+            source = manifest.get("download", {}).get("supported_sources", {}).get("modelscope", {})
+            assets = (
+                manifest.get("comfyui_assets", {})
+                .get("variants", {})
+                .get(plan["model"]["variant"], {})
             )
+            destination = _argument_after(argv, "--local_dir")
+            includes = tuple(
+                argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "--include"
+            )
+            expected_prefix = (
+                str(PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/modelscope"),
+                "download",
+                "--model",
+                source.get("repository"),
+            )
+            if (
+                argv[:4] != expected_prefix
+                or not revision
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", revision)
+                or destination != plan["target"]["model_root"]
+                or not _under_remote_root(destination, (plan["target"]["model_root"],))
+                or includes != tuple(assets.get("files", ()))
+            ):
+                raise ExecutionBlocked(
+                    "ModelScope 下载必须固定仓库/revision，并精确下载所选变体的允许量化文件"
+                )
+        else:  # pragma: no cover - command policy guards this branch
+            raise ExecutionBlocked("未实现的模型下载客户端")
+    elif action == "create_service_config":
+        if plan["framework"]["name"] == "comfyui":
+            expected = (
+                "ln",
+                "-s",
+                plan["target"]["model_root"],
+                str(PurePosixPath(plan["target"]["install_root"]) / "models"),
+            )
+            if argv != expected:
+                raise ExecutionBlocked(
+                    "ComfyUI 配置只能创建指向独立 model_root 的精确 models 符号链接"
+                )
+        else:
+            non_options = [value for value in argv[1:] if not value.startswith("-")]
+            if len(non_options) < 2 or not all(
+                _under_remote_root(value, roots) for value in non_options[-2:]
+            ):
+                raise ExecutionBlocked("服务配置源/目标必须位于目标根目录下")
     elif action == "start_own_service":
         dangerous_prefixes = (
             "--privileged",
@@ -288,6 +413,7 @@ def _validate_step_command(
         expected = {
             "sglang": {"sglang", "docker", "podman"},
             "vllm-omni": {"vllm", "docker", "podman"},
+            "comfyui": {"systemd-run"},
         }.get(plan["framework"]["name"], set())
         if executable not in expected:
             raise ExecutionBlocked("服务可执行文件与已审核框架不一致")
@@ -311,32 +437,118 @@ def _validate_step_command(
                 image,
             )
             if argv != expected_argv or not re.search(r"@sha256:[0-9a-fA-F]{64}$", image):
-                raise ExecutionBlocked(
-                    "Docker 服务启动必须符合已审核的精确 run 语法"
-                )
+                raise ExecutionBlocked("Docker 服务启动必须符合已审核的精确 run 语法")
         elif executable == "podman":
             raise ExecutionBlocked("MVP 执行器尚未实现 Podman 服务启动")
         elif executable == "sglang":
             expected_argv = (
-                plan["framework"]["runtime_artifact"]["executable"], "serve",
-                "--model-path", plan["target"]["model_root"],
-                "--model-variant", plan["model"]["variant"],
-                "--num-gpus", str(len(plan["target"]["gpu_ids"])),
-                "--host", plan["service"]["bind_host"],
-                "--port", str(plan["service"]["port"]),
+                plan["framework"]["runtime_artifact"]["executable"],
+                "serve",
+                "--model-path",
+                plan["target"]["model_root"],
+                "--model-variant",
+                plan["model"]["variant"],
+                "--num-gpus",
+                str(len(plan["target"]["gpu_ids"])),
+                "--host",
+                plan["service"]["bind_host"],
+                "--port",
+                str(plan["service"]["port"]),
             )
             if argv != expected_argv:
                 raise ExecutionBlocked("SGLang 服务命令与已审核启动命令不一致")
         elif executable == "vllm":
             expected_argv = (
-                plan["framework"]["runtime_artifact"]["executable"], "serve",
-                plan["target"]["model_root"], "--omni", "--trust-remote-code",
-                "--num-gpus", str(len(plan["target"]["gpu_ids"])),
-                "--host", plan["service"]["bind_host"],
-                "--port", str(plan["service"]["port"]),
+                plan["framework"]["runtime_artifact"]["executable"],
+                "serve",
+                plan["target"]["model_root"],
+                "--omni",
+                "--trust-remote-code",
+                "--num-gpus",
+                str(len(plan["target"]["gpu_ids"])),
+                "--host",
+                plan["service"]["bind_host"],
+                "--port",
+                str(plan["service"]["port"]),
             )
             if argv != expected_argv:
                 raise ExecutionBlocked("vLLM 服务命令与已审核启动命令不一致")
+        elif executable == "systemd-run":
+            runtime = plan["framework"]["runtime_artifact"]
+            cuda_visible_devices = ",".join(str(item) for item in plan["target"]["gpu_ids"])
+            expected_argv = (
+                "systemd-run",
+                "--user",
+                f"--unit={plan['deployment_id']}",
+                "--collect",
+                f"--property=WorkingDirectory={runtime['location']}",
+                f"--setenv=CUDA_VISIBLE_DEVICES={cuda_visible_devices}",
+                runtime["executable"],
+                str(PurePosixPath(runtime["location"]) / "main.py"),
+                "--listen",
+                plan["service"]["bind_host"],
+                "--port",
+                str(plan["service"]["port"]),
+                "--base-directory",
+                plan["target"]["install_root"],
+                "--lowvram",
+                "--disable-auto-launch",
+            )
+            if plan["framework"]["name"] != "comfyui" or argv != expected_argv:
+                raise ExecutionBlocked("ComfyUI 服务必须通过隔离的精确 systemd-run --user 命令启动")
+    elif action == "stop_own_service":
+        expected = ("systemctl", "--user", "stop", f"{plan['deployment_id']}.service")
+        if plan["framework"]["name"] != "comfyui" or argv != expected:
+            raise ExecutionBlocked("回滚只能停止由当前部署创建的 ComfyUI user unit")
+
+
+def _validate_comfyui_plan_shape(plan: Mapping[str, Any]) -> None:
+    if plan["framework"]["name"] != "comfyui":
+        return
+    uv_path, python_path = _comfy_bootstrap(plan)
+    steps = list(plan["steps"])
+    action_set = {step["action"] for step in steps}
+    required = {
+        "inspect",
+        "clone_source_checkout",
+        "checkout_source_revision",
+        "create_isolated_venv",
+        "install_isolated_dependencies",
+        "download_model",
+        "create_service_config",
+        "start_own_service",
+    }
+    if not required.issubset(action_set):
+        raise ExecutionBlocked(
+            "ComfyUI 计划缺少隔离运行时、ModelScope、user systemd 或服务启动步骤"
+        )
+    systemd_checks = {
+        step["step_id"]
+        for step in steps
+        if tuple(step["command"]) == ("systemctl", "--user", "is-system-running")
+    }
+    starts = [step for step in steps if step["action"] == "start_own_service"]
+    if (
+        len(systemd_checks) != 1
+        or len(starts) != 1
+        or not systemd_checks.intersection(starts[0].get("depends_on", []))
+    ):
+        raise ExecutionBlocked("ComfyUI 启动必须依赖精确的 user systemd 只读可用性检查")
+    bootstrap_checks = {
+        step["step_id"]
+        for step in steps
+        if tuple(step["command"]) in {("test", "-x", uv_path), ("test", "-x", python_path)}
+    }
+    venv_steps = [step for step in steps if step["action"] == "create_isolated_venv"]
+    if (
+        len(bootstrap_checks) != 2
+        or len(venv_steps) != 1
+        or not bootstrap_checks.issubset(venv_steps[0].get("depends_on", []))
+    ):
+        raise ExecutionBlocked("ComfyUI 创建隔离环境前必须检查已审核的 uv 与 Python 路径")
+    rollback = plan["rollback"]["steps"]
+    if len(rollback) != 1 or rollback[0]["action"] != "stop_own_service":
+        raise ExecutionBlocked("ComfyUI 计划必须有且仅有一个停止自有 user unit 的回滚步骤")
 
 
 def validate_executable_plan(
@@ -359,7 +571,7 @@ def validate_executable_plan(
     if plan.get("license_gate", {}).get("status") != policy["license_gate"]["allowed_ready_status"]:
         raise ExecutionBlocked("许可门禁未通过")
     _validate_lifecycle(plan)
-    _validate_framework_evidence_and_recipe(plan)
+    framework_recipe = _validate_framework_evidence_and_recipe(plan)
     actual_hash = canonical_plan_sha256(plan)
     if not hmac.compare_digest(review.get("plan_sha256", ""), actual_hash):
         raise ExecutionBlocked("已审核计划 SHA-256 与规范化计划不一致")
@@ -385,13 +597,13 @@ def validate_executable_plan(
             if expected == "PROTECTED":
                 if not _scope_authorizes(step):
                     raise ExecutionBlocked(
-                        "受保护步骤缺少限定至该步骤和动作的批准："
-                        f"{step['step_id']}"
+                        f"受保护步骤缺少限定至该步骤和动作的批准：{step['step_id']}"
                     )
                 raise ExecutionBlocked(
                     "MVP 执行器绝不自动执行受保护动作；批准必须在单独且明确受监督的流程中处理"
                 )
-            _validate_step_command(step, plan, execution["command_policy"])
+            _validate_step_command(step, plan, execution["command_policy"], framework_recipe)
+    _validate_comfyui_plan_shape(plan)
 
 
 def _secret_values(environ: Mapping[str, str] | None, dotenv_path: Path | None) -> tuple[str, ...]:
@@ -444,14 +656,34 @@ def _validate_license_binding(plan: Mapping[str, Any], request: Mapping[str, Any
         raise ExecutionBlocked("许可门禁类型/来源与模型清单不一致")
     excluded = {
         _normalized_region(value)
-        for value in license_data.get(
-            "excluded_territories_without_separate_license", []
-        )
+        for value in license_data.get("excluded_territories_without_separate_license", [])
     }
     if _normalized_region(request["deployment_region"]) in excluded and not gate.get(
         "authorization_reference"
     ):
         raise ExecutionBlocked("部署区域需要单独许可授权")
+
+
+def _comfyui_runtime_gate(
+    gate: GateResult, _host_profile: Mapping[str, Any], plan: Mapping[str, Any]
+) -> GateResult:
+    """Require reviewed runtime paths; remote checks run before any write operation."""
+    if plan["framework"]["name"] != "comfyui":
+        return gate
+    blockers = list(gate.blockers)
+    try:
+        _comfy_bootstrap(plan)
+    except ExecutionBlocked as exc:
+        blockers.append(str(exc))
+    if not blockers:
+        return gate
+    return GateResult(
+        "BLOCKED",
+        tuple(blockers),
+        warnings=gate.warnings,
+        recommendations=gate.recommendations
+        + ("请记录经只读探测确认的隔离 uv/Python 绝对路径，再重新审核计划。",),
+    )
 
 
 def authorize_execution(
@@ -502,6 +734,7 @@ def authorize_execution(
         environment_strategy=environment.get("strategy"),
         environment_isolated=bool(environment.get("isolated")),
     )
+    gate = _comfyui_runtime_gate(gate, host_profile, plan)
     if not gate.passed:
         raise ExecutionBlocked("预检未通过：" + "；".join(gate.blockers))
     return gate
@@ -532,26 +765,18 @@ def remote_writer_lock(
     try:
         acquired = transport.run(tuple(acquire_command), timeout=20)
     except Exception as exc:
-        raise ExecutionBlocked(
-            f"远端写入锁获取失败：{exc.__class__.__name__}"
-        ) from exc
+        raise ExecutionBlocked(f"远端写入锁获取失败：{exc.__class__.__name__}") from exc
     if acquired.returncode != 0:
-        raise ExecutionBlocked(
-            "远端写入锁已被持有或不可用；绝不自动移除陈旧锁"
-        )
+        raise ExecutionBlocked("远端写入锁已被持有或不可用；绝不自动移除陈旧锁")
     try:
         yield
     finally:
         try:
             released = transport.run(tuple(release_command), timeout=20)
         except Exception as exc:
-            raise ExecutionBlocked(
-                f"远端写入锁释放失败：{exc.__class__.__name__}"
-            ) from exc
+            raise ExecutionBlocked(f"远端写入锁释放失败：{exc.__class__.__name__}") from exc
         if released.returncode != 0:
-            raise ExecutionBlocked(
-                "释放远端写入锁失败；需要人工检查"
-            )
+            raise ExecutionBlocked("释放远端写入锁失败；需要人工检查")
 
 
 def _live_preflight(
@@ -600,6 +825,7 @@ def _live_preflight(
         environment_strategy=environment["strategy"],
         environment_isolated=environment["isolated"],
     )
+    gate = _comfyui_runtime_gate(gate, live_profile, plan)
     if not gate.passed:
         raise ExecutionBlocked("实时预检未通过：" + "；".join(gate.blockers))
 
@@ -612,6 +838,13 @@ def _probe_runtime_artifact(plan: Mapping[str, Any], transport: CommandTransport
         raise ExecutionBlocked(f"框架运行时探测失败：{exc.__class__.__name__}") from exc
     if result.returncode != 0 or result.stdout.strip() != runtime["revision"]:
         raise ExecutionBlocked("已安装框架运行时与已审核不可变 pin 不一致")
+
+
+def _plan_bootstraps_runtime(plan: Mapping[str, Any]) -> bool:
+    return any(
+        step["action"] in {"clone_source_checkout", "checkout_source_revision"}
+        for step in plan["steps"]
+    )
 
 
 def _execute_plan_unrecorded(
@@ -644,67 +877,70 @@ def _execute_plan_unrecorded(
         required_cuda,
         _probe_collector,
     )
-    _probe_runtime_artifact(plan, transport)
+    bootstraps_runtime = _plan_bootstraps_runtime(plan)
+    if not bootstraps_runtime:
+        _probe_runtime_artifact(plan, transport)
     lock = plan["executor_controls"]["remote_writer_lock"]
     with (
         single_writer_lock(plan["target"]["host_id"], lock_directory),
         remote_writer_lock(transport, lock["acquire_command"], lock["release_command"]),
     ):
+        if not bootstraps_runtime:
             _probe_runtime_artifact(plan, transport)
-            for step in sorted(plan["steps"], key=lambda item: item["sequence"]):
-                dependencies = set(step.get("depends_on", []))
-                if not dependencies.issubset(completed):
-                    raise ExecutionBlocked(
-                        f"{step['step_id']} 的前置条件失败：依赖尚未完成"
-                    )
-                if step["action_class"] != "READ_ONLY":
-                    _live_preflight(
-                        transport,
-                        request,
-                        plan,
-                        host_profile,
-                        required_cuda,
-                        _probe_collector,
-                    )
-                names = step.get("environment_variable_names", [])
-                step_env = {}
-                for name in names:
-                    value = process_env.get(name, file_env.get(name))
-                    if value is None:
-                        raise ExecutionBlocked(f"缺少必需环境变量：{name}")
-                    step_env[name] = value
-                if step["action"] == "start_own_service":
-                    step_env["CUDA_VISIBLE_DEVICES"] = ",".join(
-                        str(gpu_id) for gpu_id in plan["target"]["gpu_ids"]
-                    )
-                argv = tuple(step["command"])
-                step_started_at = datetime.now(timezone.utc).isoformat()
-                try:
-                    result: CommandResult = transport.run(
-                        argv, timeout=timeout, cwd=step.get("working_directory"), env=step_env
-                    )
-                except Exception as exc:
-                    raise ExecutionBlocked(
-                        f"{step['step_id']} 的 SSH 执行失败：{exc.__class__.__name__}"
-                    ) from exc
-                if tuple(result.argv) != argv:
-                    raise ExecutionBlocked(f"检测到 {step['step_id']} 的命令漂移")
-                recorded = StepResult(
-                    step["step_id"],
-                    step_started_at,
-                    datetime.now(timezone.utc).isoformat(),
-                    result.returncode,
-                    _redact(result.stdout, secrets),
-                    _redact(result.stderr, secrets),
+        for step in sorted(plan["steps"], key=lambda item: item["sequence"]):
+            dependencies = set(step.get("depends_on", []))
+            if not dependencies.issubset(completed):
+                raise ExecutionBlocked(f"{step['step_id']} 的前置条件失败：依赖尚未完成")
+            if step["action_class"] != "READ_ONLY":
+                _live_preflight(
+                    transport,
+                    request,
+                    plan,
+                    host_profile,
+                    required_cuda,
+                    _probe_collector,
                 )
-                results.append(recorded)
-                if result.returncode != 0:
-                    return ExecutionResult(
-                        "BLOCKED",
-                        tuple(results),
-                        f"步骤 {step['step_id']} 以退出状态 {result.returncode} 失败",
-                    )
-                completed.add(step["step_id"])
+            names = step.get("environment_variable_names", [])
+            step_env = {}
+            for name in names:
+                value = process_env.get(name, file_env.get(name))
+                if value is None:
+                    raise ExecutionBlocked(f"缺少必需环境变量：{name}")
+                step_env[name] = value
+            if step["action"] == "start_own_service":
+                step_env["CUDA_VISIBLE_DEVICES"] = ",".join(
+                    str(gpu_id) for gpu_id in plan["target"]["gpu_ids"]
+                )
+            argv = tuple(step["command"])
+            step_started_at = datetime.now(timezone.utc).isoformat()
+            try:
+                result: CommandResult = transport.run(
+                    argv, timeout=timeout, cwd=step.get("working_directory"), env=step_env
+                )
+            except Exception as exc:
+                raise ExecutionBlocked(
+                    f"{step['step_id']} 的 SSH 执行失败：{exc.__class__.__name__}"
+                ) from exc
+            if tuple(result.argv) != argv:
+                raise ExecutionBlocked(f"检测到 {step['step_id']} 的命令漂移")
+            recorded = StepResult(
+                step["step_id"],
+                step_started_at,
+                datetime.now(timezone.utc).isoformat(),
+                result.returncode,
+                _redact(result.stdout, secrets),
+                _redact(result.stderr, secrets),
+            )
+            results.append(recorded)
+            if result.returncode != 0:
+                return ExecutionResult(
+                    "BLOCKED",
+                    tuple(results),
+                    f"步骤 {step['step_id']} 以退出状态 {result.returncode} 失败",
+                )
+            completed.add(step["step_id"])
+            if step["action"] == "checkout_source_revision":
+                _probe_runtime_artifact(plan, transport)
     return ExecutionResult("EXECUTED", tuple(results))
 
 
@@ -742,9 +978,7 @@ def execute_plan(
         if archive is not None:
             blocker = _redact(
                 str(exc),
-                _secret_values(
-                    dict(environ if environ is not None else os.environ), dotenv_path
-                ),
+                _secret_values(dict(environ if environ is not None else os.environ), dotenv_path),
             )
             archive.record(
                 stage="EXECUTE",
@@ -766,9 +1000,7 @@ def execute_plan(
             stage="EXECUTE",
             status=result.status,
             summary=(
-                "已执行完整审核计划"
-                if result.status == "EXECUTED"
-                else "远程执行因步骤失败而停止"
+                "已执行完整审核计划" if result.status == "EXECUTED" else "远程执行因步骤失败而停止"
             ),
             host_id=str(plan["target"]["host_id"]),
             details={
@@ -849,9 +1081,7 @@ def archive_reviewed_lifecycle(
             "PLAN_REVIEW",
         }:
             continue
-        lifecycle_path = _resolved_repo_file(
-            str(transition["artifact"]["path"]), ROOT
-        )
+        lifecycle_path = _resolved_repo_file(str(transition["artifact"]["path"]), ROOT)
         artifacts = list(dict.fromkeys((lifecycle_path, *extras.get(stage, ()))))
         archive.record(
             stage=stage,

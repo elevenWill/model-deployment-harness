@@ -70,6 +70,8 @@ OS、kernel、CPU、RAM、GPU 与 VRAM、driver 兼容性、Docker、Python、st
 
 每项重要计划决策都指向 evidence ID。每条 evidence 记录来源 URL、发布者、authority tier、获取时间、主张、适用性、置信度、官方验证状态以及是否为推断。`config/source-policy.yaml` 允许 S/A 来源支持部署决策，B 来源仅作补充的边缘案例证据，C/D 来源仅作线索。较低级别来源不能覆盖较高级别来源。
 
+ComfyUI 调研进一步区分官方更新/固定核心源码、GitHub Issue/PR、PyPI 官方包和 CSDN 技术实测。合并且固定 commit 的上游代码可以是 A 级，维护者确认通常是 B 级，普通 Issue 与 CSDN 报告只能生成复测线索。PyPI 元数据可确认发布版本与平台制品，但实际部署仍需固定并记录所选 wheel 的 SHA-256。
+
 ## 验证边界
 
 验证与执行分离。`VerificationResult` 记录 L1 环境、L2 进程、L3 端口、L4 API、L5 真实推理和 L6 输出验证。只有 L5 与 L6 均为 `PASS`，结果才能为 `VERIFIED`。启动进程、打开端口或完成 package 安装均不满足此契约。模型专属请求和输出检查属于 model recipe，而通用结果记录 artifact 与资源/耗时 metrics。
