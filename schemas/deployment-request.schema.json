@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "deployment-request.schema.json",
   "title": "部署请求",
-  "description": "必填用户意图。任何必填意图字段均无默认值；缺失时必须在侦察或执行前返回 NEEDS_USER_INPUT。",
+  "description": "规划前必须落成的完整用户意图。任何必填字段均无默认值；完整门禁缺失时必须在规划或执行前返回 NEEDS_USER_INPUT，但不阻止已通过连接门禁的安全只读主机侦察。",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "request_id", "requested_at", "requested_by", "target", "model", "framework_preference", "service", "existing_environment_policy", "intended_use", "deployment_region"],
@@ -49,7 +49,7 @@
         "variant": {"type": "string", "minLength": 1}
       }
     },
-    "framework_preference": {"type": "string", "enum": ["sglang", "vllm-omni", "ALLOW_RECIPE_SELECTION"]},
+    "framework_preference": {"type": "string", "enum": ["sglang", "vllm-omni"]},
     "service": {
       "type": "object",
       "additionalProperties": false,

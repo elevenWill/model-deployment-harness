@@ -30,7 +30,7 @@ def _request() -> dict:
             "model_root": "/data/models",
         },
         "model": {"id": "minimax-h3", "variant": "fl2va"},
-        "framework_preference": "ALLOW_RECIPE_SELECTION",
+        "framework_preference": "sglang",
         "service": {"mode": "container", "bind_host": "127.0.0.1", "port": 30010},
         "existing_environment_policy": "PRESERVE_AND_ISOLATE",
         "intended_use": "internal evaluation",

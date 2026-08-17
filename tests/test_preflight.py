@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.preflight import host_preflight, requirement_gate
+from scripts.preflight import discovery_gate, host_preflight, requirement_gate
 
 
 def request():
@@ -41,6 +41,20 @@ def test_missing_intent_is_needs_user_input_and_never_defaulted():
     assert result.status == "NEEDS_USER_INPUT"
     assert "target.gpu_ids" in result.missing_fields
     assert "target.install_root" in result.missing_fields
+
+
+def test_read_only_discovery_is_not_blocked_by_complete_deployment_intent():
+    connection_only = {
+        "target": {
+            "host": {
+                "address": "10.0.0.25",
+                "ssh_username": "deploy",
+                "ssh_port": 22,
+            }
+        }
+    }
+    assert discovery_gate(connection_only).status == "PASS"
+    assert requirement_gate(connection_only).status == "NEEDS_USER_INPUT"
 
 
 def test_ssh_failure_blocks():

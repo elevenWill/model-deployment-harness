@@ -48,10 +48,51 @@ MODEL_TOKEN=
 首次连接前，必须通过可信渠道核对主机 SSH 指纹，并写入本机的 `~/.ssh/known_hosts`。
 工具使用严格的 known-host 校验，不会自动接受未知主机。
 
-## 3. 创建部署请求
+## 3. 持续收集需求
 
-在项目根目录创建 `request.json`。它是用户意图，不应包含从主机探测得出的 CPU、内存、
-GPU 占用或磁盘事实。最小示例如下：
+不需要一次把所有信息填完。先把第一轮信息写到 `intake-update.json`：
+
+```json
+{
+  "target": {
+    "host": {"address": "10.0.0.25", "ssh_port": 22}
+  },
+  "model": {"id": "minimax-h3"}
+}
+```
+
+创建可持续更新的草稿：
+
+```bash
+python scripts/intake.py create \
+  --draft-id minimax-h3-test-001 \
+  --update intake-update.json \
+  --output deployments/intake-draft.json
+```
+
+用户后续补充信息时，只写新增或修改的字段，然后递归合并：
+
+```bash
+python scripts/intake.py merge \
+  --draft deployments/intake-draft.json \
+  --update next-update.json
+python scripts/intake.py status --draft deployments/intake-draft.json
+```
+
+状态输出会先列出已经记住的内容，并只询问真正缺少的项。草稿可记录以下自然偏好：
+
+- `model.variant: both`：同时部署 `fl2va` 和 `ref2va`；
+- `preferences.download_source: modelscope`：使用 ModelScope；
+- `preferences.environment_isolation: isolated_uv`：保留原环境，使用独立 uv 环境；
+- `preferences.framework_selection: delegate_to_supported_recipe`：允许工具在受支持方案中选择；
+- `preferences.port_policy.strategy: prefer_default_then_available`：优先默认端口，占用时根据只读探测选择可用端口。
+
+当前远程下载执行器尚未适配 ModelScope。工具会保留这个选择，并提示需要在计划阶段完成
+执行适配与审核；不会假装已经支持，也不会让用户重复选择来源。
+
+草稿不等于执行授权。主机侦察后，必须把偏好解析为精确框架和端口，生成完整的
+`request.json`。它是用户意图，不应包含从主机探测得出的 CPU、内存、GPU 占用或磁盘事实。
+完整示例如下：
 
 ```json
 {
@@ -70,7 +111,7 @@ GPU 占用或磁盘事实。最小示例如下：
     "model_root": "/data/models"
   },
   "model": {"id": "minimax-h3", "variant": "fl2va"},
-  "framework_preference": "ALLOW_RECIPE_SELECTION",
+  "framework_preference": "vllm-omni",
   "service": {
     "mode": "container",
     "bind_host": "127.0.0.1",
@@ -82,21 +123,23 @@ GPU 占用或磁盘事实。最小示例如下：
 }
 ```
 
-以 [部署请求 Schema](../schemas/deployment-request.schema.json) 为准。必填字段缺失时，
-工具会返回 `NEEDS_USER_INPUT`，不会猜测端口、GPU 或目录。
+以 [部署需求草稿 Schema](../schemas/intake-draft.schema.json) 和
+[部署请求 Schema](../schemas/deployment-request.schema.json) 为准。完整请求的必填字段缺失时，
+工具会返回 `NEEDS_USER_INPUT`，不会猜测 GPU、目录或最终执行值。
 
 MiniMax-H3 的 `fl2va` 与 `ref2va` 单分区各约 135 GiB；`both` 约 270 GiB，规划时还要
 为缓存、临时文件、媒体输出和回滚预留空间。EU、UK、KR、US 部署需单独授权依据。
 
-## 4. 需求门禁与只读主机侦察
+## 4. 分层门禁与只读主机侦察
 
-先验证请求；该命令不会连接主机：
+只读检查不需要等完整部署方案确定。先检查草稿是否已经包含服务器、SSH 用户名和端口：
 
 ```bash
-python scripts/preflight.py requirement --request request.json
+python scripts/preflight.py discovery --draft deployments/intake-draft.json
 ```
 
-得到通过结果后，才可在用户明确授权范围内进行只读 SSH 侦察：
+通过后，即可在用户明确授权范围内进行只读 SSH 侦察。连接仍会严格核对 `known_hosts`；未知
+主机指纹会被拒绝：
 
 ```bash
 python scripts/probe_host.py \
@@ -107,7 +150,14 @@ python scripts/probe_host.py \
   --output host-profile.json
 ```
 
-再对探测结果执行预检：
+只读结果用于查看 GPU、内存、磁盘、环境和端口占用，再把框架与端口偏好解析成精确值。
+在编写计划前，必须验证完整请求；该命令不会连接主机：
+
+```bash
+python scripts/preflight.py requirement --request request.json
+```
+
+完整门禁通过后，再对探测结果执行规划前预检：
 
 ```bash
 python scripts/preflight.py host \
@@ -119,6 +169,9 @@ python scripts/preflight.py host \
 
 预检会阻止 GPU 被占用、端口被占用、发现不完整、CUDA/驱动不兼容或未隔离环境等情况。
 它不会停止其他进程、升级驱动或修改系统环境。
+
+连接门禁通过只允许只读侦察。它不允许创建目录、下载模型或启动服务；这些远程写入仍必须
+经过完整请求、研究、精确计划、许可检查和 `READY` 审核。
 
 ## 5. 编写与审核部署计划
 

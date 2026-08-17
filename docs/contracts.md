@@ -6,6 +6,7 @@
 
 | 契约 | 文件 | 边界 |
 | --- | --- | --- |
+| IntakeDraft | `schemas/intake-draft.schema.json` | 可跨多轮合并的部分意图与自然偏好；不能授权写入 |
 | DeploymentRequest | `schemas/deployment-request.schema.json` | 完整、明确的用户意图 |
 | HostProfile | `schemas/host-profile.schema.json` | 来自只读探测的带时间戳事实 |
 | ResearchEvidence | `schemas/research-evidence.schema.json` | 可追溯主张及来源质量 |
@@ -26,7 +27,19 @@
 
 ## 用户意图与主机事实
 
-`DeploymentRequest` 保存发现阶段无法安全推断的意图。必需 target 字段包括请求者身份、主机定位信息及 SSH 用户名/端口、GPU ID、安装根目录、模型根目录、模型 ID 与变体、精确框架偏好或允许 recipe 选择的明确授权、服务模式、绑定主机和端口、允许如何处理现有环境、预期用途及部署区域。它们均没有 schema 默认值。若任一字段缺失，需求门禁必须输出 `NEEDS_USER_INPUT`；不得填充习惯端口、选择空闲 GPU 或部署到 `/root`。
+`IntakeDraft` 位于用户对话和最终 `DeploymentRequest` 之间。它允许字段暂时不完整，每一轮结构化更新都递归合并，因此新一轮没有重述的 GPU、目录、模型变体、监听地址、地区和用途不会丢失。草稿还可记录“两个变体”、ModelScope 下载源、独立 uv/venv、框架选择委托以及“优先默认端口，占用后从探测结果选择”的端口策略。密码、私钥和访问令牌不能进入草稿。
+
+门禁分为三层：
+
+1. 只读连接门禁只检查主机选择器、SSH 用户名和端口；通过后允许执行严格 `known_hosts` 校验下的主机侦察。
+2. 完整需求门禁要求 `DeploymentRequest` 中的部署意图全部落成精确值，才允许进入规划。
+3. 远程执行还必须有许可门禁通过且审核状态为 `READY` 的精确 `DeploymentPlan`。
+
+`DeploymentRequest` 保存发现阶段无法安全推断的最终意图。必需 target 字段包括请求者身份、主机定位信息及 SSH 用户名/端口、GPU ID、安装根目录、模型根目录、模型 ID 与变体、已解析的精确框架、服务模式、绑定主机和端口、允许如何处理现有环境、预期用途及部署区域。它们均没有 schema 默认值。完整门禁缺少任一字段时必须输出 `NEEDS_USER_INPUT`，并阻止规划与执行；不得填充习惯端口、选择空闲 GPU 或部署到 `/root`。但只要连接门禁通过，它不再阻止安全的只读主机侦察。
+
+偏好不是执行值。框架委托和动态端口策略先保存在草稿中；侦察完成后，工具必须将它们解析为已支持的精确框架和未占用的精确端口。最终请求和计划仍记录精确框架、端口与命令。
+
+ModelScope 可以作为已确认下载源保存在草稿中，但当前执行器的下载动作尚未支持它。摘要必须说明“等待计划阶段适配和审核”，不得假装能够下载，也不得再次让用户选择下载源。
 
 OS、kernel、CPU、RAM、GPU 与 VRAM、driver 兼容性、Docker、Python、storage、mount、进程、被占用端口、topology 和 connectivity 不是请求字段。只读探测在 `HostProfile` 中以 `observed_at` 和探测完整度记录它们。未能发现必需事实会阻止规划；这不构成要求用户猜测的许可。
 

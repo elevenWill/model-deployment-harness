@@ -482,10 +482,7 @@ def authorize_execution(
     if plan.get("service") != request.get("service"):
         mismatches.append("service")
     preference = request.get("framework_preference")
-    if (
-        preference != "ALLOW_RECIPE_SELECTION"
-        and plan.get("framework", {}).get("name") != preference
-    ):
+    if plan.get("framework", {}).get("name") != preference:
         mismatches.append("framework_preference")
     if mismatches:
         raise ExecutionBlocked("计划/请求/主机制品不匹配：" + "、".join(mismatches))

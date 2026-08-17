@@ -25,6 +25,8 @@ _SECRET_KEYS = {
     "hf_token",
     "access_token",
     "api_key",
+    "token",
+    "model_token",
 }
 SECRET_VALUE_ENVIRONMENT_NAMES = {
     "DEPLOY_SSH_PASSWORD",

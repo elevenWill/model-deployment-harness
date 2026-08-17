@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from scripts._common import HarnessError, load_document, validate_instance
+from scripts.intake import discovery_missing_fields
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -67,6 +68,17 @@ def requirement_gate(
     except HarnessError as exc:
         return GateResult("BLOCKED", blockers=(str(exc),))
     return GateResult("PASS")
+
+
+def discovery_gate(source: Mapping[str, Any]) -> GateResult:
+    """只检查只读 SSH 发现所需的连接意图，不授权任何远程写入。"""
+    missing = discovery_missing_fields(source)
+    if missing:
+        return GateResult("NEEDS_USER_INPUT", missing_fields=missing)
+    return GateResult(
+        "PASS",
+        recommendations=("连接时必须继续使用严格的 SSH known_hosts 主机指纹校验",),
+    )
 
 
 def _version_tuple(value: str) -> tuple[int, ...]:
@@ -149,8 +161,12 @@ def host_preflight(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="运行只读工具的需求/主机门禁")
+    parser = argparse.ArgumentParser(description="运行分层需求门禁和主机兼容性预检")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    discovery = subparsers.add_parser("discovery", help="检查是否可以开始只读 SSH 侦察")
+    discovery_source = discovery.add_mutually_exclusive_group(required=True)
+    discovery_source.add_argument("--draft", type=Path)
+    discovery_source.add_argument("--request", type=Path)
     requirement = subparsers.add_parser("requirement")
     requirement.add_argument("--request", required=True, type=Path)
     host = subparsers.add_parser("host")
@@ -165,10 +181,13 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        request = load_document(args.request)
+        if args.command == "discovery":
+            result = discovery_gate(load_document(args.draft or args.request))
+        else:
+            request = load_document(args.request)
         if args.command == "requirement":
             result = requirement_gate(request)
-        else:
+        elif args.command == "host":
             result = host_preflight(
                 request,
                 load_document(args.host_profile),

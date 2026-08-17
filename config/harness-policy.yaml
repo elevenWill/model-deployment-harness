@@ -6,7 +6,22 @@ pipeline:
 
 requirement_gate:
   contract: schemas/deployment-request.schema.json
+  draft_contract: schemas/intake-draft.schema.json
   missing_required_intent_status: NEEDS_USER_INPUT
+  discovery_connection_gate:
+    unlocks: HOST_DISCOVERY
+    required_user_intent:
+      - target.host
+      - target.host.ssh_username
+      - target.host.ssh_port
+    external_controls:
+      - strict_ssh_known_hosts
+    does_not_unlock: [PLAN, PLAN_REVIEW, EXECUTE]
+  complete_request_gate:
+    required_before: [PLAN, PLAN_REVIEW, EXECUTE]
+    unresolved_preferences_must_be_exact:
+      - framework_preference
+      - service.port
   required_user_intent:
     - requested_by
     - target.host
