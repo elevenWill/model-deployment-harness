@@ -7,3 +7,5 @@ SGLang 是默认首选的规划候选，因为其官方 cookbook 提供了最清
 MiniMax H3 Community License 在未另行授权的情况下将 EU、UK、Republic of Korea 和 USA 排除在 Applicable Territory 之外，并包含实质性的使用/分发条件。区域、预期用途、适用时的业务授权以及 license 接受均是强制计划门禁。完整来源台账、硬件证据和未解决事项请见 `../../research/minimax-h3/`。
 
 ComfyUI 路线另有机器可读的 `../../research/minimax-h3/comfyui-evidence.yaml`：它覆盖官方更新日志和固定核心源码、GitHub Issue/PR、PyPI `comfy-kitchen` 包文档以及 CSDN 技术实测。官方固定源码和包元数据可支撑版本事实；社区内容仅用于生成目标主机复测项。
+
+当目标硬件不匹配现有推荐矩阵时，不应直接把“未验证”当作“不可能”。`../../research/minimax-h3/fallback-evidence-strategy.md` 记录了官方 offload/量化/多卡修复、社区复现线索及从候选到隔离 capacity trial 的安全门禁；C/D 线索不能单独支撑部署。

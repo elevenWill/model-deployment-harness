@@ -5,7 +5,7 @@
   "kernel": "6.8.0-40-generic\n",
   "architecture": "x86_64\n",
   "cpu": "{\"lscpu\":[{\"field\":\"Architecture:\",\"data\":\"x86_64\"},{\"field\":\"CPU(s):\",\"data\":\"64\"},{\"field\":\"Model name:\",\"data\":\"AMD EPYC 9354P\"}]}",
-  "memory": "MemTotal:       263752000 kB\nMemFree:         1000000 kB\n",
+  "memory": "MemTotal:       263752000 kB\nMemAvailable:    200000000 kB\nMemFree:         1000000 kB\n",
   "gpus": "0, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, NVIDIA H100 80GB HBM3, 81920, 80000, 550.90.07\n1, GPU-11111111-2222-3333-4444-555555555555, NVIDIA H100 80GB HBM3, 81920, 79000, 550.90.07\n",
   "cuda": "NVIDIA-SMI 550.90.07 Driver Version: 550.90.07 CUDA Version: 12.4\n",
   "gpu_processes": "",

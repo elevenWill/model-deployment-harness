@@ -57,9 +57,11 @@
       "properties": {
         "mode": {"type": "string", "enum": ["foreground", "managed_service", "container"]},
         "bind_host": {"type": "string", "minLength": 1},
-        "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "max_concurrency": {"type": "integer", "minimum": 1}
       }
     },
+    "inference": {"type": "object", "additionalProperties": false, "required": ["concurrency", "short_edge", "duration_seconds"], "properties": {"concurrency": {"type": "integer", "minimum": 1}, "short_edge": {"type": "integer", "minimum": 1}, "duration_seconds": {"type": "number", "exclusiveMinimum": 0}, "input_authorization_reference": {"type": "string", "minLength": 1}}},
     "existing_environment_policy": {"type": "string", "enum": ["PRESERVE_AND_ISOLATE", "ALLOW_PLANNED_CHANGES"]},
     "intended_use": {"type": "string", "minLength": 1},
     "deployment_region": {"type": "string", "minLength": 1},

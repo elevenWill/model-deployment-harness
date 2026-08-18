@@ -10,6 +10,7 @@
 | DeploymentRequest | `schemas/deployment-request.schema.json` | 完整、明确的用户意图 |
 | HostProfile | `schemas/host-profile.schema.json` | 来自只读探测的带时间戳事实 |
 | ResearchEvidence | `schemas/research-evidence.schema.json` | 可追溯主张及来源质量 |
+| CompatibilityAssessment | `schemas/compatibility-assessment.schema.json` | 区分可调研适配缺口与不可绕过门禁 |
 | ExecutionStep | `schemas/execution-step.schema.json` | 单个有界操作、成功标准和回滚链接 |
 | DeploymentPlan | `schemas/deployment-plan.schema.json` | 已审核执行输入、证据、license、验证和回滚门禁 |
 | VerificationResult | `schemas/verification-result.schema.json` | L1-L6 观测与真实推理结果 |
@@ -47,6 +48,63 @@ OS、kernel、CPU、RAM、GPU 与 VRAM、driver 兼容性、Docker、Python、st
 
 请求的 `host` 是定位信息，可包含稳定 `host_id`、hostname、address 或 alias。IP 地址永远不是主机身份。`HostProfile` 和 `HostRegistry` 使用 `host_id` 作为稳定 key，并仅将地址保存为属性。
 
+## 非推荐配置的适配边界
+
+“不在官方推荐配置中”不是部署失败结论。完成主机发现后，应把差异写入
+`CompatibilityAssessment`：GPU 型号或拓扑差异、内存压力、运行时版本差异和框架能力缺口返回
+`RESEARCH_NEEDED`，下一阶段是只读 `RESEARCH`，不会直接进入执行，也不会以 `BLOCKED` 结束。
+
+调研可以从论坛、Issue、PR 和技术社区收集候选方案，但这些内容只是复现线索。候选尚未复现时返回
+`READY_FOR_TRIAL`，而不是造成死锁的 `BLOCKED`。随后必须生成独立的 `purpose=CAPACITY_TRIAL`、
+经审核 `READY` 的计划，仍按正常执行器和 L5/L6 验证流程运行。纯 C/D 社区证据只能维持
+`RESEARCH_NEEDED`；每个缺口都必须由 S/A 级证据通过 `supports_gap_ids` 和
+`supports_mechanism_ids` 直接支持具体缓解机制，才可进入试跑。
+
+容量试跑计划本身也必须反向引用产生它的 `READY_FOR_TRIAL` assessment（路径、SHA-256、assessment
+ID 与 candidate ID），原样带入候选证据和全部试跑条件，并把每项条件绑定到写入前只读检查。它只
+允许隔离环境、模型/运行时准备、自有服务启停和只读检查，不能借试跑名义扩大动作范围。
+
+评估器会加载请求、HostProfile、试跑计划、逐步执行记录、InferenceProof、原始请求载荷、任务响应、
+生成输出、SemanticReview 和 VerificationResult，逐一校验 schema、SHA-256、请求/部署/主机/框架/
+时间及计划 hash 的交叉引用。执行记录必须按顺序成功覆盖计划全部步骤；L5/L6 会通过推理证明、语义
+审核和媒体完整解码重新验证，不能信任 VerificationResult 中自行填写的 `PASS`。
+
+只有完整制品链验证成功，适配状态才是 `VALIDATED`。它仅说明适配证据可以作为正式计划输入；完整
+需求、许可、关键 S/A 证据、正式计划和计划审核仍需分别通过。正式计划使用适配方案时还必须绑定
+assessment hash、候选 ID 和全部计划条件，执行器会在写入前复核。S/A 证据必须以
+`supports_gap_ids` 和 `supports_mechanism_ids` 关联具体缺口与缓解机制，不能用无关官方页面搭配社区
+帖子制造放行结论；目标机容量试跑证据也必须覆盖候选声明的全部缺口。
+
+部署计划用 `compatibility.basis` 明确区分已登记的 `CATALOG_PROFILE`、受审试跑用的
+`CAPACITY_TRIAL` 和正式适配用的 `VALIDATED_ADAPTATION`。正式计划不能把未登记 profile ID 冒充
+推荐配置；执行器发现档案不存在或框架不匹配时会要求回到适配调研。
+
+`CATALOG_PROFILE` 也不能只凭 profile ID 放行。执行器会在初次授权和每次实时预检中，把计划选择的
+GPU 与目录中的明确条件逐项比较：GPU 数量、规范型号、每卡总显存，以及所选 GPU 间的完整互连拓扑
+和允许的链路类型。若 profile 声明 `host_ram.minimum_available_gib`，还会使用最新
+`HostProfile.hardware.memory.available_bytes` 比较可用内存；缺少该观测或低于阈值都失败关闭，恰好
+等于阈值才通过。目录出现执行器尚不能验证的新物理条件时也必须返回适配调研，不能静默忽略。目录
+缺字段或实时观测不匹配时不能把单卡 fixture 冒充 `4xH200` 配置。
+
+目录中的运行范围使用结构化 `limits`，不再使用不可执行的自由文本：`max_concurrency`、
+`max_short_edge`、`max_duration_seconds`、允许的 variant，以及按 variant 生效的参考输入授权要求。
+`DeploymentPlan.compatibility.catalog_limits` 同时保存目录上限和本次请求选择的精确值；执行器会与
+`DeploymentRequest.inference` 逐项比较，且 `service.max_concurrency` 必须等于选择的并发值；执行器会
+在初次授权和实时预检重新确认未越限。缺失字段、未知 limit 字段或越限一律回到适配调研。
+`ref2va`/`both` 的本地参考输入授权引用必须在 request、计划和 license gate 三处完全一致，不能用
+说明文字代替授权引用。
+
+许可冲突、安全门禁、真实物理容量不足、目标资源不可用、必须执行未获批的受保护变更，以及无法完成
+L5/L6 验证，仍然立即 `BLOCKED`。调研完成后没有候选方案、候选条件不匹配或目标主机复现失败也会
+`BLOCKED`，并以白话说明具体原因。执行期 `host_preflight()` 继续严格失败关闭；适配评估不会放宽
+`READY` 计划、计划审核、实时重探测或单一写入者要求。
+
+采用适配候选的 `DeploymentPlan.compatibility.adaptation` 必须保存评估制品的仓库内路径与 SHA-256，
+并明确选择的 assessment、candidate 和全部 `plan_conditions`。执行器会重新验证评估、试运行计划、
+执行记录和 L5/L6 验证结果的哈希及 request、trial deployment、host observation、不可变 runtime 交叉
+绑定。每条计划条件还必须一对一绑定一个 `READ_ONLY inspect` 步骤；所有写步骤都必须直接或间接依赖
+全部这些检查，确保条件在任何远程写入前实际通过。未采用适配的计划不需要该可选字段。
+
 ## 计划与执行边界
 
 计划包含精确的请求和主机观测引用、目标、recipe、选择的框架、隔离环境策略、有序步骤、风险、必要变更、证据、服务模式/暴露方式、验证契约、回滚步骤、license 门禁、审核和状态。它还记录带 artifact hash 的精确已完成生命周期前缀。`READY` 计划必须且只能按序出现一次 `INTAKE` 至 `PLAN_REVIEW`。每次转换均使用独立的带类型 artifact，系统验证其阶段、PASS 状态、请求 ID、部署 ID、路径和 SHA-256。
@@ -76,7 +134,7 @@ ComfyUI 调研进一步区分官方更新/固定核心源码、GitHub Issue/PR�
 
 验证与执行分离。`VerificationResult` 记录 L1 环境、L2 进程、L3 端口、L4 API、L5 真实推理和 L6 输出验证。只有 L5 与 L6 均为 `PASS`，结果才能为 `VERIFIED`。启动进程、打开端口或完成 package 安装均不满足此契约。模型专属请求和输出检查属于 model recipe，而通用结果记录 artifact 与资源/耗时 metrics。
 
-调用者提供的 L5/L6 断言会被丢弃。L5 从带类型的 `InferenceProof` 重建：endpoint 和端口必须匹配审核服务，且请求 payload、完成任务响应和输出文件均存在并具有匹配 hash。L6 需要完整 decode/codec 检查，以及一个绑定同一输出 hash 的具名 `SemanticOutputReview`；裸 Boolean acceptance 无效。
+调用者提供的 L5/L6 断言会被丢弃。L5 从带类型的 `InferenceProof` 重建：endpoint 和端口必须匹配审核服务，且请求 payload、完成任务响应和输出文件均存在并具有匹配 hash。验证配方用 JSON Pointer 或已审核的输出项解析器声明完成响应中的产物 ID、实际下载 URL 和服务提供的内容 hash；runner 只能下载该响应指向的同源内容并自行计算 hash，verifier 则从原始响应重新解析并逐项比对。因此，旧输出文件不能与另一条 `COMPLETED` 响应拼接为有效证明。对于 history 不提供内容 hash 的 ComfyUI，runner 会在内存副本中把一次性高熵 token 注入配方指定的输出名前缀字段；调用方提供的 payload 始终只读，实际发送字节以原子且不覆盖的方式另存为 proof 旁的 harness evidence artifact，InferenceProof 只引用这份实际请求。history 中唯一输出项必须包含该 token，并绑定 prompt、节点、输出槽位、文件名、下载开始时间、响应头、长度和自算 hash。配方未声明这条命名链、history 不匹配，或未在规定时间内开始下载时均失败关闭。L6 需要完整 decode/codec 检查，以及一个绑定同一输出 hash 的具名 `SemanticOutputReview`；裸 Boolean acceptance 无效。
 
 `DeploymentPlan.status` 为 `VERIFIED` 仅是生命周期元数据，必须始终有独立的 `VerificationResult` 支撑。同样，标为 `VERIFIED` 的 `DeploymentRecord` 需要 verification reference 和完整验证时间。
 

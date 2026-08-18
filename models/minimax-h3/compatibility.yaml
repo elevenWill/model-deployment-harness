@@ -5,41 +5,52 @@ profiles:
   - id: comfyui-1xrtx3090-int8-convrot-experimental
     framework: comfyui
     gpu: {model: RTX 3090, count: 1, memory_gib_each: 24}
+    topology: {kind: SINGLE_GPU, allowed_link_prefixes: []}
     host_ram: {minimum_available_gib: 60}
     strategy: isolated_comfyui_pruned_int8_convrot_low_vram
     confidence: LOW
     evidence: COMFY-MODELSCOPE
     status: EXPERIMENTAL
     limits:
-      - 不是上游已验证的 H3 最低硬件配置；不得作为兼容性或稳定性承诺。
-      - 仅允许单并发、768 short-edge、4 秒 FL2VA 冒烟；Ref2VA 需单独的已获授权本地参考输入。
-      - 必须在 L5/L6 通过后才可报告 VERIFIED；任何 OOM、驱动不兼容或工作流节点失败均停止且不影响其他服务。
+      max_concurrency: 1
+      max_short_edge: 768
+      max_duration_seconds: 4
+      allowed_variants: [fl2va, ref2va, both]
+      input_authorization: {required_variants: [ref2va, both], input_kind: local_reference}
   - id: sglang-4xh200-resident
     framework: sglang
     gpu: {model: H200, count: 4, memory_gib_each: 141}
+    topology: {kind: FULL_MESH, allowed_link_prefixes: [NV]}
     strategy: resident_ulysses4
     confidence: HIGH
     evidence: SGL-DOC
+    limits: {max_concurrency: 1, max_short_edge: 768, max_duration_seconds: 15, allowed_variants: [fl2va, ref2va, both], input_authorization: {required_variants: [ref2va, both], input_kind: local_reference}}
   - id: sglang-4xh100-80gb
     framework: sglang
     gpu: {model: H100, count: 4, memory_gib_each: 80}
+    topology: {kind: FULL_MESH, allowed_link_prefixes: [NV]}
     strategy: tp2_ulysses2
     confidence: HIGH
     evidence: SGL-MATRIX
+    limits: {max_concurrency: 1, max_short_edge: 768, max_duration_seconds: 15, allowed_variants: [fl2va, ref2va, both], input_authorization: {required_variants: [ref2va, both], input_kind: local_reference}}
   - id: sglang-2xrtx5090-offload
     framework: sglang
     gpu: {model: RTX 5090, count: 2, memory_gib_each: 32}
+    topology: {kind: FULL_MESH, allowed_link_prefixes: [NV, PIX, PXB, PHB, NODE, SYS]}
     host_ram: {minimum_available_gib: 200, recommended_total_gib: 384}
     strategy: tp2_layerwise_offload
     confidence: HIGH
     evidence: SGL-MATRIX
+    limits: {max_concurrency: 1, max_short_edge: 768, max_duration_seconds: 15, allowed_variants: [fl2va, ref2va, both], input_authorization: {required_variants: [ref2va, both], input_kind: local_reference}}
   - id: vllm-omni-2xrtx5090-dlo
     framework: vllm-omni
     gpu: {model: RTX 5090, count: 2, memory_gib_each: 32}
+    topology: {kind: FULL_MESH, allowed_link_prefixes: [NV, PIX, PXB, PHB, NODE, SYS]}
     host_ram: {minimum_available_gib: 200, recommended_total_gib: 384}
     strategy: tp2_distributed_layerwise_offload
     confidence: HIGH
     evidence: VLO-REC
+    limits: {max_concurrency: 1, max_short_edge: 768, max_duration_seconds: 15, allowed_variants: [fl2va, ref2va, both], input_authorization: {required_variants: [ref2va, both], input_kind: local_reference}}
 
 preflight_requirements:
   - 用户精确指定的 GPU ID 存在且未被占用

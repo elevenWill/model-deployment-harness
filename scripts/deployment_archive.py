@@ -188,6 +188,7 @@ class DeploymentArchive:
             steps.append(step)
         record: dict[str, Any] = {
             "schema_version": "1.0",
+            "producer": "HARNESS_PLAN_EXECUTOR",
             "execution_id": f"execution-{self.deployment_id}-{sequence:04d}",
             "deployment_id": self.deployment_id,
             "host_id": host_id,

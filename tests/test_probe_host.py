@@ -43,6 +43,7 @@ def test_collects_complete_schema_valid_host_profile():
 
     validate_instance(profile, "host-profile.schema.json")
     assert profile["identity"]["addresses"] == ["10.0.0.25", "192.168.1.25"]
+    assert profile["hardware"]["memory"]["available_bytes"] == 200000000 * 1024
     assert profile["hardware"]["gpus"][0]["memory_total_bytes"] == 81920 * 1024 * 1024
     assert profile["software"]["docker"]["nvidia_runtime_available"] is True
     assert profile["network"]["listening_ports"] == [22, 30010]

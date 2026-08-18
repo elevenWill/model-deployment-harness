@@ -4,9 +4,10 @@
   "title": "远程执行记录",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "execution_id", "deployment_id", "host_id", "plan_sha256", "started_at", "completed_at", "status", "steps"],
+  "required": ["schema_version", "producer", "execution_id", "deployment_id", "host_id", "plan_sha256", "started_at", "completed_at", "status", "steps"],
   "properties": {
     "schema_version": {"const": "1.0"},
+    "producer": {"const": "HARNESS_PLAN_EXECUTOR"},
     "execution_id": {"type": "string", "minLength": 1},
     "deployment_id": {"type": "string", "minLength": 1},
     "host_id": {"type": "string", "minLength": 1},

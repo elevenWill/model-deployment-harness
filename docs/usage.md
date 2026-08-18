@@ -171,6 +171,23 @@ python scripts/preflight.py host \
 预检会阻止 GPU 被占用、端口被占用、发现不完整、CUDA/驱动不兼容或未隔离环境等情况。
 它不会停止其他进程、升级驱动或修改系统环境。
 
+如果发现的硬件只是不在官方推荐配置中，不要把它写成硬阻塞。先按
+[兼容性适配评估 Schema](../schemas/compatibility-assessment.schema.json) 生成
+`compatibility-assessment.json`，记录差异、调研进度、候选方案、证据引用、目标条件检查和绑定当前
+主机观测的复现结果，然后运行：
+
+```bash
+python scripts/preflight.py adaptation \
+  --assessment compatibility-assessment.json
+```
+
+首次评估会以退出状态 0 返回 `RESEARCH_NEEDED` 和 `next_stage: RESEARCH`，表示工作流应继续调研，
+不是部署终止。论坛、Issue/PR 和技术社区可用于寻找候选方案。候选尚未复现时返回
+`READY_FOR_TRIAL`：需要先制作并审核一份 `purpose=CAPACITY_TRIAL` 的独立 `READY` 计划，再通过正常
+执行和 L5/L6 验证产出带哈希的执行、验证和输出制品。完整交叉校验后状态变为 `VALIDATED`；这只代表
+适配证据可供正式计划引用，不等于正式部署已经获准规划或执行。调研无候选、试跑失败或遇到
+许可、安全、物理容量、受保护变更及无法验证等硬门禁时仍返回 `BLOCKED`。
+
 连接门禁通过只允许只读侦察。它不允许创建目录、下载模型或启动服务；这些远程写入仍必须
 经过完整请求、研究、精确计划、许可检查和 `READY` 审核。
 

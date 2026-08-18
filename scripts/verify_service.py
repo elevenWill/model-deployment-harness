@@ -22,6 +22,7 @@ try:
         validate_instance,
     )
     from scripts.deployment_archive import DeploymentArchive
+    from scripts.run_inference import resolve_output_binding
 except ModuleNotFoundError:  # pragma: no cover - direct script execution
     from _common import (  # type: ignore[no-redef]
         ROOT,
@@ -33,6 +34,7 @@ except ModuleNotFoundError:  # pragma: no cover - direct script execution
         validate_instance,
     )
     from deployment_archive import DeploymentArchive  # type: ignore[no-redef]
+    from run_inference import resolve_output_binding  # type: ignore[no-redef]
 
 LEVELS = (
     "L1_environment",
@@ -171,15 +173,49 @@ def _validate_inference_proof(
         raise HarnessError("任务响应不包含已记录的任务 ID")
     if str(response.get("status", "")).upper() != "COMPLETED":
         raise HarnessError("任务响应未记录已完成的推理")
+    if recipe is None:
+        raise HarnessError("推理证明校验必须提供已审核验证配方")
+    reconstructed_binding = resolve_output_binding(
+        response,
+        proof["job"]["job_id"],
+        recipe.get("inference_api", {}),
+        proof["endpoint"].rstrip("/") + "/",
+        payload,
+    )
+    if any(
+        proof["output_binding"].get(key) != value
+        for key, value in reconstructed_binding.items()
+    ):
+        raise HarnessError("推理证明中的输出绑定与原始完成响应不一致")
     if Path(proof["output"]["path"]).resolve() != output_path.resolve():
         raise HarnessError("推理证明输出路径与 --media 不一致")
     if proof["output"]["sha256"].lower() != file_sha256(output_path).lower():
         raise HarnessError("推理证明输出哈希与 --media 不一致")
+    response_hash = reconstructed_binding.get("response_content_sha256")
+    if response_hash is not None and response_hash != proof["output"]["sha256"].lower():
+        raise HarnessError("生成输出哈希与原始完成响应声明的产物不一致")
+    binding = proof["output_binding"]
+    actual_hash = file_sha256(output_path).lower()
+    if binding["download_sha256"].lower() != actual_hash:
+        raise HarnessError("下载时计算的输出哈希与当前输出不一致")
+    if int(binding["download_content_length"]) != output_path.stat().st_size:
+        raise HarnessError("下载时记录的内容长度与当前输出不一致")
+    header_length = binding["response_headers"].get("content_length")
+    if header_length is not None and int(header_length) != output_path.stat().st_size:
+        raise HarnessError("输出响应 Content-Length 与当前输出不一致")
     submitted = datetime.fromisoformat(proof["request"]["submitted_at"].replace("Z", "+00:00"))
     completed = datetime.fromisoformat(proof["job"]["completed_at"].replace("Z", "+00:00"))
+    downloaded = datetime.fromisoformat(binding["downloaded_at"].replace("Z", "+00:00"))
     duration = (completed - submitted).total_seconds()
-    if duration < 0:
-        raise HarnessError("推理完成时间早于提交时间")
+    if duration < 0 or downloaded < completed:
+        raise HarnessError("推理提交、任务完成和输出下载时间顺序无效")
+    if binding["resolver"] == "RECIPE_OUTPUT_ITEM":
+        token_rule = recipe["inference_api"]["output_reference"]["job_token"]
+        max_delay = token_rule.get("max_download_delay_seconds")
+        if not isinstance(max_delay, (int, float)) or max_delay <= 0:
+            raise HarnessError("ComfyUI 配方缺少有效的立即下载时间上限")
+        if (downloaded - completed).total_seconds() > float(max_delay):
+            raise HarnessError("ComfyUI 输出未在任务完成后按配方要求立即下载")
     return duration
 
 

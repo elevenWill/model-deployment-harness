@@ -290,9 +290,15 @@ def _parse_cpu(text: str) -> tuple[str, int]:
         return "unknown", 1
 
 
-def _parse_memory(text: str) -> int:
-    match = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, re.MULTILINE)
-    return int(match.group(1)) * 1024 if match else 0
+def _parse_memory(text: str) -> tuple[int, int]:
+    total = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, re.MULTILINE)
+    available = re.search(r"^MemAvailable:\s+(\d+)\s+kB", text, re.MULTILINE)
+    if available is None:
+        available = re.search(r"^MemFree:\s+(\d+)\s+kB", text, re.MULTILINE)
+    return (
+        int(total.group(1)) * 1024 if total else 0,
+        int(available.group(1)) * 1024 if available else 0,
+    )
 
 
 def _parse_topology(text: str, uuid_by_index: Mapping[int, str]) -> list[dict[str, object]]:
@@ -472,6 +478,7 @@ def collect_host_profile(
     hostname = results["hostname"].stdout.strip() or "unknown"
     addresses = list(dict.fromkeys(results["addresses"].stdout.split())) or [hostname]
     status = "COMPLETE" if not errors else ("PARTIAL" if hostname != "unknown" else "FAILED")
+    memory_total, memory_available = _parse_memory(results["memory"].stdout)
     return {
         "schema_version": "1.0",
         "host_id": host_id,
@@ -488,7 +495,8 @@ def collect_host_profile(
                 "logical_cores": logical_cores,
                 "architecture": results["architecture"].stdout.strip() or "unknown",
             },
-            "memory_bytes": _parse_memory(results["memory"].stdout),
+            "memory_bytes": memory_total,
+            "memory": {"total_bytes": memory_total, "available_bytes": memory_available},
             "gpus": gpus,
             "gpu_topology": _parse_topology(results["topology"].stdout, uuid_by_index),
         },

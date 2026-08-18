@@ -31,6 +31,7 @@
       "properties": {
         "cpu": {"type": "object", "additionalProperties": false, "required": ["model", "logical_cores"], "properties": {"model": {"type": "string", "minLength": 1}, "logical_cores": {"type": "integer", "minimum": 1}, "architecture": {"type": "string", "minLength": 1}}},
         "memory_bytes": {"type": "integer", "minimum": 0},
+        "memory": {"type": "object", "additionalProperties": false, "required": ["total_bytes", "available_bytes"], "properties": {"total_bytes": {"type": "integer", "minimum": 0}, "available_bytes": {"type": "integer", "minimum": 0}}},
         "gpus": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["index", "uuid", "model", "memory_total_bytes", "memory_free_bytes"], "properties": {"index": {"type": "integer", "minimum": 0}, "uuid": {"type": "string", "minLength": 1}, "model": {"type": "string", "minLength": 1}, "memory_total_bytes": {"type": "integer", "minimum": 0}, "memory_free_bytes": {"type": "integer", "minimum": 0}}}},
         "gpu_topology": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["gpu_a", "gpu_b", "link"], "properties": {"gpu_a": {"$ref": "common.schema.json#/$defs/gpuId"}, "gpu_b": {"$ref": "common.schema.json#/$defs/gpuId"}, "link": {"type": "string", "minLength": 1}}}}
       }

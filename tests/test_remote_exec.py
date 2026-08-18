@@ -2,19 +2,39 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
-from scripts._common import ROOT, canonical_plan_sha256, file_sha256
+from scripts._common import (
+    ROOT,
+    HarnessError,
+    canonical_plan_sha256,
+    file_sha256,
+    load_document,
+    validate_instance,
+)
 from scripts.deployment_archive import DeploymentArchive
 from scripts.probe_host import CommandResult
 from scripts.remote_exec import (
     ExecutionBlocked,
+    _validate_adaptation_binding,
+    _validate_capacity_trial_actions,
+    _validate_catalog_limits,
+    _validate_catalog_request_limits,
     archive_reviewed_lifecycle,
     authorize_execution,
     execute_plan,
     validate_executable_plan,
 )
+from scripts.run_inference import resolve_output_binding
+
+
+def _write_json_artifact(root: Path, name: str, document: dict) -> dict[str, str]:
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return {"path": name, "sha256": file_sha256(path)}
 
 
 def ready_plan():
@@ -48,13 +68,14 @@ def ready_plan():
     }
     plan = {
         "schema_version": "1.0",
+        "purpose": "STANDARD",
         "deployment_id": "dep-1",
         "request_id": "req-1",
         "created_at": "2026-08-17T00:00:00Z",
         "host_profile_observed_at": "2026-08-17T00:01:00Z",
         "target": {
             "host_id": "knode25",
-            "gpu_ids": [0],
+            "gpu_ids": [0, 1, 2, 3],
             "install_root": "/opt/models",
             "model_root": "/models",
         },
@@ -83,9 +104,28 @@ def ready_plan():
             "rationale": "official support",
             "evidence_ids": ["ev-1"],
         },
-        "compatibility": {"profile_id": "fixture-compatible", "required_cuda": "12.6"},
+        "compatibility": {
+            "basis": "CATALOG_PROFILE",
+            "profile_id": "sglang-4xh200-resident",
+            "required_cuda": "12.6",
+            "catalog_limits": {
+                "max_concurrency": 1,
+                "max_short_edge": 768,
+                "max_duration_seconds": 15,
+                "selected_concurrency": 1,
+                "selected_short_edge": 768,
+                "selected_duration_seconds": 5,
+                "variant": "fl2va",
+                "input_kind": "none",
+            },
+        },
         "environment": {"strategy": "container", "isolated": True, "rationale": "preserve host"},
-        "service": {"mode": "container", "bind_host": "127.0.0.1", "port": 30011},
+        "service": {
+            "mode": "container",
+            "bind_host": "127.0.0.1",
+            "port": 30011,
+            "max_concurrency": 1,
+        },
         "lifecycle": {
             "transitions": [
                 {
@@ -181,13 +221,19 @@ def deployment_request():
         "requested_by": "operator",
         "target": {
             "host": {"host_id": "knode25", "ssh_username": "deploy", "ssh_port": 22},
-            "gpu_ids": [0],
+            "gpu_ids": [0, 1, 2, 3],
             "install_root": "/opt/models",
             "model_root": "/models",
         },
         "model": {"id": "minimax-h3", "variant": "fl2va"},
         "framework_preference": "sglang",
-        "service": {"mode": "container", "bind_host": "127.0.0.1", "port": 30011},
+        "service": {
+            "mode": "container",
+            "bind_host": "127.0.0.1",
+            "port": 30011,
+            "max_concurrency": 1,
+        },
+        "inference": {"concurrency": 1, "short_edge": 768, "duration_seconds": 5},
         "existing_environment_policy": "PRESERVE_AND_ISOLATE",
         "intended_use": "research",
         "deployment_region": "CN",
@@ -204,16 +250,22 @@ def observed_host():
         "hardware": {
             "cpu": {"model": "fixture", "logical_cores": 32, "architecture": "x86_64"},
             "memory_bytes": 512 * 1024**3,
+            "memory": {"total_bytes": 512 * 1024**3, "available_bytes": 400 * 1024**3},
             "gpus": [
                 {
-                    "index": 0,
-                    "uuid": "GPU-fixture",
-                    "model": "fixture GPU",
-                    "memory_total_bytes": 80 * 1024**3,
-                    "memory_free_bytes": 79 * 1024**3,
+                    "index": index,
+                    "uuid": f"GPU-h200-{index}",
+                    "model": "NVIDIA H200",
+                    "memory_total_bytes": 141 * 1024**3,
+                    "memory_free_bytes": 140 * 1024**3,
                 }
+                for index in range(4)
             ],
-            "gpu_topology": [],
+            "gpu_topology": [
+                {"gpu_a": f"GPU-h200-{a}", "gpu_b": f"GPU-h200-{b}", "link": "NV4"}
+                for a in range(4)
+                for b in range(a + 1, 4)
+            ],
         },
         "software": {
             "os": {"name": "Fixture Linux", "version": "1"},
@@ -238,6 +290,556 @@ def observed_host():
         "network": {"listening_ports": [22], "connectivity_checks": []},
         "runtime": {"gpu_processes": [], "model_services": []},
     }
+
+
+def comfy_host():
+    host = observed_host()
+    host["hardware"]["gpus"] = [
+        {
+            "index": 0,
+            "uuid": "GPU-rtx3090-0",
+            "model": "NVIDIA GeForce RTX 3090",
+            "memory_total_bytes": 24 * 1024**3,
+            "memory_free_bytes": 23 * 1024**3,
+        }
+    ]
+    host["hardware"]["gpu_topology"] = []
+    return host
+
+
+def rtx5090_catalog_case(available_gib: int) -> tuple[dict, dict, dict]:
+    plan = ready_plan()
+    plan["target"]["gpu_ids"] = [0, 1]
+    plan["compatibility"]["profile_id"] = "sglang-2xrtx5090-offload"
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    request = deployment_request()
+    request["target"]["gpu_ids"] = [0, 1]
+    host = observed_host()
+    host["hardware"]["gpus"] = [
+        {
+            "index": index,
+            "uuid": f"GPU-rtx5090-{index}",
+            "model": "NVIDIA GeForce RTX 5090",
+            "memory_total_bytes": 32 * 1024**3,
+            "memory_free_bytes": 31 * 1024**3,
+        }
+        for index in range(2)
+    ]
+    host["hardware"]["gpu_topology"] = [
+        {"gpu_a": "GPU-rtx5090-0", "gpu_b": "GPU-rtx5090-1", "link": "PXB"}
+    ]
+    host["hardware"]["memory"] = {
+        "total_bytes": 512 * 1024**3,
+        "available_bytes": available_gib * 1024**3,
+    }
+    return plan, request, host
+
+
+def adaptive_ready_plan(tmp_path: Path, monkeypatch) -> dict:
+    """Build a fully hashed local trial chain without touching a real host."""
+    import scripts.remote_exec as remote_exec
+
+    monkeypatch.setattr(remote_exec, "ROOT", tmp_path)
+    monkeypatch.setattr("scripts.preflight.validate_media", lambda *_: (True, "fixture"))
+    request_ref = _write_json_artifact(tmp_path, "request.json", deployment_request())
+    host = observed_host()
+    host_ref = _write_json_artifact(tmp_path, "host.json", host)
+    output_ref = _write_json_artifact(tmp_path, "trial-output.json", {"output": "decodable"})
+    trial_plan = ready_plan()
+    trial_plan["purpose"] = "CAPACITY_TRIAL"
+    trial_plan["compatibility"]["basis"] = "CAPACITY_TRIAL"
+    trial_plan["deployment_id"] = "trial-dep-1"
+    evidence = deepcopy(trial_plan["evidence"][0])
+    evidence["supports_gap_ids"] = ["gpu-profile"]
+    evidence["supports_mechanism_ids"] = ["low-memory-mode"]
+    trial_plan["evidence"] = [evidence]
+    pretrial_candidate = {
+        "candidate_id": "low-vram",
+        "description": "validated low-memory mode",
+        "applies_to_gap_ids": ["gpu-profile"],
+        "evidence_ids": ["ev-1"],
+        "mitigation_mechanisms": [
+            {
+                "mechanism_id": "low-memory-mode",
+                "description": "reduce memory pressure",
+                "addresses_gap_ids": ["gpu-profile"],
+                "evidence_ids": ["ev-1"],
+            }
+        ],
+        "applicability_checks": [{"name": "fixture host", "status": "PASS"}],
+        "local_reproduction": {"status": "NOT_RUN"},
+        "plan_conditions": ["target root remains available"],
+    }
+    pretrial_assessment = {
+        "schema_version": "1.0",
+        "assessment_id": "adapt-1",
+        "request_id": "req-1",
+        "request_artifact": request_ref,
+        "host_id": "knode25",
+        "host_profile_observed_at": "2026-08-17T00:01:00Z",
+        "host_profile_artifact": host_ref,
+        "adaptation_status": "READY_FOR_TRIAL",
+        "next_stage": "PLAN",
+        "gaps": [
+            {
+                "gap_id": "gpu-profile",
+                "category": "recommended_profile_mismatch",
+                "description": "fixture GPU is not a recommended profile",
+            }
+        ],
+        "research": {
+            "status": "COMPLETED",
+            "selected_candidate_id": "low-vram",
+            "candidates": [pretrial_candidate],
+        },
+        "evidence": [evidence],
+    }
+    pretrial_ref = _write_json_artifact(tmp_path, "pretrial-assessment.json", pretrial_assessment)
+    trial_plan["compatibility"]["adaptation"] = {
+        "assessment_ref": pretrial_ref,
+        "assessment_id": "adapt-1",
+        "candidate_id": "low-vram",
+        "plan_conditions": [
+            {
+                "condition": "target root remains available",
+                "preflight_step_id": "trial-condition",
+            }
+        ],
+    }
+    trial_plan["steps"][0]["sequence"] = 2
+    trial_plan["steps"][0]["depends_on"] = ["trial-condition"]
+    trial_plan["steps"].insert(
+        0,
+        {
+            "step_id": "trial-condition",
+            "sequence": 1,
+            "name": "verify trial condition",
+            "action": "inspect",
+            "action_class": "READ_ONLY",
+            "command": ["test", "-d", "/opt/models"],
+            "depends_on": [],
+            "success_criteria": ["target root remains available"],
+            "rollback_step_ids": [],
+        },
+    )
+    trial_plan["review"]["plan_sha256"] = canonical_plan_sha256(trial_plan)
+    trial_plan_ref = _write_json_artifact(tmp_path, "trial-plan.json", trial_plan)
+    trial_hash = canonical_plan_sha256(trial_plan)
+    execution_ref = _write_json_artifact(
+        tmp_path,
+        "trial-execution.json",
+        {
+            "schema_version": "1.0",
+            "execution_id": "trial-exec-1",
+            "producer": "HARNESS_PLAN_EXECUTOR",
+            "deployment_id": "trial-dep-1",
+            "host_id": "knode25",
+            "plan_sha256": trial_hash,
+            "started_at": "2026-08-17T00:02:00Z",
+            "completed_at": "2026-08-17T00:03:00Z",
+            "status": "EXECUTED",
+            "steps": [
+                {
+                    "step_id": step["step_id"],
+                    "started_at": "2026-08-17T00:02:00Z",
+                    "completed_at": "2026-08-17T00:03:00Z",
+                    "returncode": 0,
+                    "stdout_redacted": "ok",
+                    "stderr_redacted": "",
+                }
+                for step in trial_plan["steps"]
+            ],
+        },
+    )
+    payload_ref = _write_json_artifact(tmp_path, "trial-payload.json", {"prompt": "fixture"})
+    payload_ref["path"] = str(tmp_path / "trial-payload.json")
+    payload_ref["media_type"] = "application/json"
+    output_ref["path"] = str(tmp_path / "trial-output.json")
+    output_ref["media_type"] = "video/mp4"
+    response_document = {
+        "id": "job-1",
+        "status": "COMPLETED",
+        "output": {
+            "id": "artifact-1",
+            "url": "/outputs/artifact-1",
+            "sha256": output_ref["sha256"],
+        },
+    }
+    response_ref = _write_json_artifact(tmp_path, "trial-response.json", response_document)
+    response_ref["path"] = str(tmp_path / "trial-response.json")
+    response_ref["media_type"] = "application/json"
+    inference_api = load_document(ROOT / "models/minimax-h3/verify.yaml")["inference_api"]
+    proof_ref = _write_json_artifact(
+        tmp_path,
+        "trial-proof.json",
+        {
+            "schema_version": "1.0",
+            "producer": "HARNESS_HTTP_RUNNER",
+            "deployment_id": "trial-dep-1",
+            "plan_sha256": trial_hash,
+            "endpoint": "http://127.0.0.1:30011",
+            "request": {
+                "method": "POST",
+                "path": "/v1/videos",
+                "payload": payload_ref,
+                "submitted_at": "2026-08-17T00:03:59Z",
+            },
+            "job": {
+                "job_id": "job-1",
+                "status": "COMPLETED",
+                "completed_at": "2026-08-17T00:04:00Z",
+                "response": response_ref,
+                "runtime_error": None,
+            },
+            "output_binding": resolve_output_binding(
+                response_document,
+                "job-1",
+                inference_api,
+                "http://127.0.0.1:30011/",
+            )
+            | {
+                "downloaded_at": "2026-08-17T00:04:01Z",
+                "download_sha256": output_ref["sha256"],
+                "download_content_length": str((tmp_path / "trial-output.json").stat().st_size),
+                "response_headers": {
+                    "content_length": str((tmp_path / "trial-output.json").stat().st_size)
+                },
+            },
+            "output": output_ref,
+        },
+    )
+    semantic_ref = _write_json_artifact(
+        tmp_path,
+        "trial-semantic.json",
+        {
+            "schema_version": "1.0",
+            "review_id": "semantic-1",
+            "deployment_id": "trial-dep-1",
+            "plan_sha256": trial_hash,
+            "output_sha256": output_ref["sha256"],
+            "reviewed_by": "fixture-reviewer",
+            "reviewed_at": "2026-08-17T00:04:00Z",
+            "checks": {
+                "not_blank_or_frozen": "PASS",
+                "audio_present_not_silent": "PASS",
+                "task_alignment": "PASS",
+            },
+        },
+    )
+    check = {
+        "status": "PASS",
+        "checked_at": "2026-08-17T00:04:00Z",
+        "detail": "fixture passed",
+    }
+    verification_ref = _write_json_artifact(
+        tmp_path,
+        "trial-verification.json",
+        {
+            "schema_version": "1.0",
+            "verification_id": "trial-verify-1",
+            "deployment_id": "trial-dep-1",
+            "host_id": "knode25",
+            "plan_sha256": trial_hash,
+            "recipe_ref": "models/minimax-h3/verify.yaml",
+            "started_at": "2026-08-17T00:03:00Z",
+            "completed_at": "2026-08-17T00:04:00Z",
+            "levels": {
+                "L1_environment": check,
+                "L2_process": check,
+                "L3_port": check,
+                "L4_api": check,
+                "L5_real_inference": check | {"evidence": [output_ref]},
+                "L6_output_validation": check | {"evidence": [output_ref]},
+            },
+            "overall_status": "VERIFIED",
+            "metrics": {"generation_duration_seconds": 1.0},
+            "framework": {
+                "name": trial_plan["framework"]["name"],
+                "version": trial_plan["framework"]["version"],
+            },
+            "gpu_topology_summary": "fixture",
+            "command_redacted": ["fixture"],
+            "artifacts": [proof_ref, semantic_ref, output_ref],
+        },
+    )
+    assessment = {
+        "schema_version": "1.0",
+        "assessment_id": "adapt-1",
+        "request_id": "req-1",
+        "request_artifact": request_ref,
+        "host_id": "knode25",
+        "host_profile_observed_at": "2026-08-17T00:01:00Z",
+        "host_profile_artifact": host_ref,
+        "adaptation_status": "VALIDATED",
+        "next_stage": "PLAN",
+        "gaps": [
+            {
+                "gap_id": "gpu-profile",
+                "category": "recommended_profile_mismatch",
+                "description": "fixture GPU is not a recommended profile",
+            }
+        ],
+        "research": {
+            "status": "COMPLETED",
+            "selected_candidate_id": "low-vram",
+            "candidates": [
+                {
+                    "candidate_id": "low-vram",
+                    "description": "validated low-memory mode",
+                    "applies_to_gap_ids": ["gpu-profile"],
+                    "evidence_ids": ["ev-1"],
+                    "mitigation_mechanisms": [
+                        {
+                            "mechanism_id": "low-memory-mode",
+                            "description": "reduce memory pressure",
+                            "addresses_gap_ids": ["gpu-profile"],
+                            "evidence_ids": ["ev-1"],
+                        }
+                    ],
+                    "applicability_checks": [{"name": "fixture host", "status": "PASS"}],
+                    "local_reproduction": {
+                        "status": "PASS",
+                        "trial_evidence": {
+                            "checked_at": "2026-08-17T00:04:00Z",
+                            "trial_deployment_id": "trial-dep-1",
+                            "trial_plan": trial_plan_ref,
+                            "execution_record": execution_ref,
+                            "inference_proof": proof_ref,
+                            "semantic_review": semantic_ref,
+                            "verification_result": verification_ref,
+                        },
+                    },
+                    "plan_conditions": ["target root remains available"],
+                }
+            ],
+        },
+        "evidence": [evidence],
+    }
+    assessment_ref = _write_json_artifact(tmp_path, "assessment.json", assessment)
+    plan = ready_plan()
+    plan["evidence"] = [evidence]
+    condition_step = {
+        "step_id": "adaptation-preflight",
+        "sequence": 1,
+        "name": "verify adaptation condition",
+        "action": "inspect",
+        "action_class": "READ_ONLY",
+        "command": ["test", "-d", "/opt/models"],
+        "success_criteria": ["target root remains available"],
+        "rollback_step_ids": [],
+    }
+    plan["steps"][0]["sequence"] = 2
+    plan["steps"][0]["depends_on"] = ["adaptation-preflight"]
+    plan["steps"].insert(0, condition_step)
+    plan["compatibility"]["adaptation"] = {
+        "assessment_ref": assessment_ref,
+        "assessment_id": "adapt-1",
+        "candidate_id": "low-vram",
+        "plan_conditions": [
+            {
+                "condition": "target root remains available",
+                "preflight_step_id": "adaptation-preflight",
+            }
+        ],
+    }
+    plan["compatibility"]["basis"] = "VALIDATED_ADAPTATION"
+    return plan
+
+
+def test_adaptive_plan_binds_validated_trial_chain_and_prewrite_check(
+    tmp_path, monkeypatch
+) -> None:
+    plan = adaptive_ready_plan(tmp_path, monkeypatch)
+    validate_instance(plan, "deployment-plan.schema.json")
+    _validate_adaptation_binding(plan)
+
+
+def test_adaptive_plan_rejects_trial_runtime_or_condition_dependency_drift(
+    tmp_path, monkeypatch
+) -> None:
+    plan = adaptive_ready_plan(tmp_path, monkeypatch)
+    plan["framework"]["version"] = "b" * 40
+    with pytest.raises(ExecutionBlocked, match="不可变运行时"):
+        _validate_adaptation_binding(plan)
+
+    plan = adaptive_ready_plan(tmp_path, monkeypatch)
+    plan["steps"][-1]["depends_on"] = []
+    with pytest.raises(ExecutionBlocked, match="每个远程写步骤"):
+        _validate_adaptation_binding(plan)
+
+
+def test_adaptive_plan_rejects_assessment_hash_drift(tmp_path, monkeypatch) -> None:
+    plan = adaptive_ready_plan(tmp_path, monkeypatch)
+    plan["compatibility"]["adaptation"]["assessment_ref"]["sha256"] = "0" * 64
+    with pytest.raises(ExecutionBlocked, match="SHA-256"):
+        _validate_adaptation_binding(plan)
+
+
+def test_adaptive_plan_revalidates_trial_execution_and_verification_artifacts(
+    tmp_path, monkeypatch
+) -> None:
+    plan = adaptive_ready_plan(tmp_path, monkeypatch)
+    assessment_path = tmp_path / plan["compatibility"]["adaptation"]["assessment_ref"]["path"]
+    assessment = json.loads(assessment_path.read_text(encoding="utf-8"))
+    trial = assessment["research"]["candidates"][0]["local_reproduction"]["trial_evidence"]
+    trial["execution_record"]["sha256"] = "0" * 64
+    assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+    plan["compatibility"]["adaptation"]["assessment_ref"]["sha256"] = file_sha256(assessment_path)
+
+    with pytest.raises(ExecutionBlocked, match="适配评估"):
+        _validate_adaptation_binding(plan)
+
+
+def test_capacity_trial_requires_ready_assessment_and_exact_candidate_binding(
+    tmp_path, monkeypatch
+) -> None:
+    adaptive_ready_plan(tmp_path, monkeypatch)
+    trial_plan = json.loads((tmp_path / "trial-plan.json").read_text(encoding="utf-8"))
+    validate_instance(trial_plan, "deployment-plan.schema.json")
+    _validate_adaptation_binding(trial_plan)
+
+    without_assessment = deepcopy(trial_plan)
+    del without_assessment["compatibility"]["adaptation"]
+    with pytest.raises(HarnessError):
+        validate_instance(without_assessment, "deployment-plan.schema.json")
+
+    assessment_path = tmp_path / "pretrial-assessment.json"
+    assessment = json.loads(assessment_path.read_text(encoding="utf-8"))
+    assessment["research"]["selected_candidate_id"] = "different-candidate"
+    assessment_path.write_text(json.dumps(assessment), encoding="utf-8")
+    trial_plan["compatibility"]["adaptation"]["assessment_ref"]["sha256"] = file_sha256(
+        assessment_path
+    )
+    with pytest.raises(ExecutionBlocked, match="评估|候选"):
+        _validate_adaptation_binding(trial_plan)
+
+
+def test_capacity_trial_rejects_actions_outside_isolated_trial_scope(tmp_path, monkeypatch) -> None:
+    adaptive_ready_plan(tmp_path, monkeypatch)
+    trial_plan = json.loads((tmp_path / "trial-plan.json").read_text(encoding="utf-8"))
+    trial_plan["steps"][-1]["action"] = "other"
+    trial_plan["steps"][-1]["action_class"] = "PLAN_ALLOWED_WRITE"
+    with pytest.raises(ExecutionBlocked, match="容量试跑包含超出"):
+        _validate_capacity_trial_actions(trial_plan)
+
+
+def test_catalog_profile_rejects_gpu_count_model_vram_and_topology_bypasses() -> None:
+    plan = ready_plan()
+    request = deployment_request()
+    one_gpu = observed_host()
+    one_gpu["hardware"]["gpus"] = one_gpu["hardware"]["gpus"][:1]
+    one_gpu["hardware"]["gpu_topology"] = []
+    plan["target"]["gpu_ids"] = [0]
+    request["target"]["gpu_ids"] = [0]
+    with pytest.raises(ExecutionBlocked, match="GPU 数量"):
+        authorize_execution(plan, request, one_gpu)
+
+    wrong_model = observed_host()
+    for gpu in wrong_model["hardware"]["gpus"]:
+        gpu["model"] = "fixture GPU"
+    with pytest.raises(ExecutionBlocked, match="GPU 型号"):
+        authorize_execution(ready_plan(), deployment_request(), wrong_model)
+
+    low_vram = observed_host()
+    low_vram["hardware"]["gpus"][0]["memory_total_bytes"] = 80 * 1024**3
+    with pytest.raises(ExecutionBlocked, match="显存"):
+        authorize_execution(ready_plan(), deployment_request(), low_vram)
+
+    disconnected = observed_host()
+    disconnected["hardware"]["gpu_topology"] = []
+    with pytest.raises(ExecutionBlocked, match="拓扑"):
+        authorize_execution(ready_plan(), deployment_request(), disconnected)
+
+
+def test_catalog_profile_host_ram_rejects_missing_and_below_minimum_but_accepts_boundary() -> None:
+    plan, request, boundary = rtx5090_catalog_case(200)
+    assert authorize_execution(plan, request, boundary).status == "PASS"
+
+    missing = deepcopy(boundary)
+    del missing["hardware"]["memory"]
+    with pytest.raises(ExecutionBlocked, match="缺少.*可用内存"):
+        authorize_execution(plan, request, missing)
+
+    _plan, _request, below = rtx5090_catalog_case(199)
+    with pytest.raises(ExecutionBlocked, match="可用内存低于"):
+        authorize_execution(plan, request, below)
+
+
+def test_catalog_profile_rechecks_available_ram_from_live_host_before_writes(tmp_path) -> None:
+    plan, request, reviewed = rtx5090_catalog_case(200)
+    _plan, _request, live = rtx5090_catalog_case(199)
+    with pytest.raises(ExecutionBlocked, match="可用内存低于"):
+        execute_plan(
+            plan,
+            FakeTransport(),
+            request=request,
+            host_profile=reviewed,
+            lock_directory=tmp_path,
+            _probe_collector=lambda _: live,
+        )
+
+
+def test_catalog_inference_limits_reject_missing_unknown_and_over_limit_at_boundary(
+    monkeypatch,
+) -> None:
+    plan = ready_plan()
+    request = deployment_request()
+    plan["compatibility"]["catalog_limits"]["selected_duration_seconds"] = 15
+    request["inference"]["duration_seconds"] = 15
+    _validate_catalog_request_limits(plan, request)
+
+    plan["compatibility"]["catalog_limits"]["selected_duration_seconds"] = 16
+    request["inference"]["duration_seconds"] = 16
+    with pytest.raises(ExecutionBlocked, match="超过目录限制"):
+        _validate_catalog_request_limits(plan, request)
+
+    missing = ready_plan()
+    del missing["compatibility"]["catalog_limits"]
+    with pytest.raises(HarnessError):
+        validate_instance(missing, "deployment-plan.schema.json")
+
+    missing_service_limit = ready_plan()
+    del missing_service_limit["service"]["max_concurrency"]
+    with pytest.raises(ExecutionBlocked, match="服务并发配置"):
+        _validate_catalog_limits(missing_service_limit)
+
+    original_profile = {
+        "limits": {
+            "max_concurrency": 1,
+            "max_short_edge": 768,
+            "max_duration_seconds": 15,
+            "allowed_variants": ["fl2va"],
+            "input_authorization": {
+                "required_variants": [],
+                "input_kind": "local_reference",
+            },
+            "unknown_physical_limit": 1,
+        }
+    }
+    monkeypatch.setattr("scripts.remote_exec._catalog_profile", lambda _plan: original_profile)
+    with pytest.raises(ExecutionBlocked, match="未知字段"):
+        _validate_catalog_limits(ready_plan())
+
+
+def test_ref2va_input_authorization_binds_request_license_and_plan() -> None:
+    plan = ready_comfyui_plan()
+    request = deployment_request()
+    request["inference"] = {
+        "concurrency": 1,
+        "short_edge": 768,
+        "duration_seconds": 4,
+        "input_authorization_reference": "fixture-reference-input-auth",
+    }
+    _validate_catalog_request_limits(plan, request)
+
+    del request["inference"]["input_authorization_reference"]
+    with pytest.raises(ExecutionBlocked, match="精确推理范围"):
+        _validate_catalog_request_limits(plan, request)
+
+    request["inference"]["input_authorization_reference"] = "fixture-reference-input-auth"
+    plan["license_gate"]["authorization_reference"] = "different-authorization"
+    with pytest.raises(ExecutionBlocked, match="请求、许可门禁和计划"):
+        _validate_catalog_request_limits(plan, request)
 
 
 def ready_comfyui_plan():
@@ -277,9 +879,22 @@ def ready_comfyui_plan():
         "evidence_ids": ["ev-1"],
     }
     plan["compatibility"] = {
+        "basis": "CATALOG_PROFILE",
         "profile_id": "comfyui-1xrtx3090-int8-convrot-experimental",
         "required_cuda": "12.6",
+        "catalog_limits": {
+            "max_concurrency": 1,
+            "max_short_edge": 768,
+            "max_duration_seconds": 4,
+            "selected_concurrency": 1,
+            "selected_short_edge": 768,
+            "selected_duration_seconds": 4,
+            "variant": "both",
+            "input_kind": "local_reference",
+            "input_authorization_reference": "fixture-reference-input-auth",
+        },
     }
+    plan["license_gate"]["authorization_reference"] = "fixture-reference-input-auth"
     plan["environment"] = {
         "strategy": "venv",
         "isolated": True,
@@ -287,7 +902,12 @@ def ready_comfyui_plan():
         "bootstrap_uv": bootstrap_uv,
         "bootstrap_python": bootstrap_python,
     }
-    plan["service"] = {"mode": "managed_service", "bind_host": "0.0.0.0", "port": 8188}
+    plan["service"] = {
+        "mode": "managed_service",
+        "bind_host": "0.0.0.0",
+        "port": 8188,
+        "max_concurrency": 1,
+    }
     model_files = [
         "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
@@ -577,12 +1197,18 @@ def test_staged_source_bundle_requires_exclusive_transfer_and_hashes(tmp_path):
         | {
             "framework_preference": "comfyui",
             "target": deployment_request()["target"]
-            | {"install_root": "/opt/h3", "model_root": "/opt/h3/model"},
+            | {"gpu_ids": [0], "install_root": "/opt/h3", "model_root": "/opt/h3/model"},
             "model": {"id": "minimax-h3", "variant": "both"},
             "service": plan["service"],
+            "inference": {
+                "concurrency": 1,
+                "short_edge": 768,
+                "duration_seconds": 4,
+                "input_authorization_reference": "fixture-reference-input-auth",
+            },
         },
-        host_profile=observed_host(),
-        _probe_collector=lambda _transport: observed_host(),
+        host_profile=comfy_host(),
+        _probe_collector=lambda _transport: comfy_host(),
     )
     assert result.status == "EXECUTED"
     assert transport.uploads == [(bundle, "/opt/h3/.comfyui.bundle", 300)]
@@ -752,12 +1378,24 @@ def test_comfyui_execution_blocks_without_reviewed_runtime_paths() -> None:
     request = deployment_request()
     request["target"]["install_root"] = "/opt/h3"
     request["target"]["model_root"] = "/opt/h3/model"
+    request["target"]["gpu_ids"] = [0]
     request["model"]["variant"] = "both"
     request["framework_preference"] = "comfyui"
-    request["service"] = {"mode": "managed_service", "bind_host": "0.0.0.0", "port": 8188}
+    request["service"] = {
+        "mode": "managed_service",
+        "bind_host": "0.0.0.0",
+        "port": 8188,
+        "max_concurrency": 1,
+    }
+    request["inference"] = {
+        "concurrency": 1,
+        "short_edge": 768,
+        "duration_seconds": 4,
+        "input_authorization_reference": "fixture-reference-input-auth",
+    }
     del plan["environment"]["bootstrap_uv"]
     with pytest.raises(ExecutionBlocked, match="独立 uv 与 Python 路径"):
-        authorize_execution(plan, request, observed_host())
+        authorize_execution(plan, request, comfy_host())
 
 
 def test_comfyui_uses_reviewed_runtime_when_ssh_path_hides_uv() -> None:
@@ -765,10 +1403,22 @@ def test_comfyui_uses_reviewed_runtime_when_ssh_path_hides_uv() -> None:
     request = deployment_request()
     request["target"]["install_root"] = "/opt/h3"
     request["target"]["model_root"] = "/opt/h3/model"
+    request["target"]["gpu_ids"] = [0]
     request["model"]["variant"] = "both"
     request["framework_preference"] = "comfyui"
-    request["service"] = {"mode": "managed_service", "bind_host": "0.0.0.0", "port": 8188}
-    host = observed_host()
+    request["service"] = {
+        "mode": "managed_service",
+        "bind_host": "0.0.0.0",
+        "port": 8188,
+        "max_concurrency": 1,
+    }
+    request["inference"] = {
+        "concurrency": 1,
+        "short_edge": 768,
+        "duration_seconds": 4,
+        "input_authorization_reference": "fixture-reference-input-auth",
+    }
+    host = comfy_host()
     host["software"]["uv_version"] = "bash: uv: command not found"
     host["software"]["python"] = [{"executable": "python3", "version": "Python 3.8.10"}]
     assert authorize_execution(plan, request, host).status == "PASS"
@@ -965,7 +1615,7 @@ def test_secret_value_in_plan_is_rejected_and_output_is_redacted(tmp_path):
 def test_occupied_gpu_cannot_be_bypassed_with_caller_assertion(tmp_path):
     host = observed_host()
     host["runtime"]["gpu_processes"] = [
-        {"gpu_id": "GPU-fixture", "pid": 88, "process_name": "unrelated", "memory_bytes": 1}
+        {"gpu_id": "GPU-h200-0", "pid": 88, "process_name": "unrelated", "memory_bytes": 1}
     ]
     with pytest.raises(ExecutionBlocked, match="占用"):
         execute_plan(
@@ -1010,7 +1660,7 @@ def test_container_launch_binds_exact_gpu_ids() -> None:
             "--name",
             "dep-1",
             "--gpus",
-            "device=0",
+            "device=0,1,2,3",
             "--publish",
             "127.0.0.1:30011:30011",
             "--detach",
@@ -1069,6 +1719,15 @@ def test_mutable_framework_low_tier_evidence_and_stage_skips_are_blocked() -> No
     )
     plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
     with pytest.raises(ExecutionBlocked, match="生命周期前缀"):
+        validate_executable_plan(plan)
+
+
+def test_uncatalogued_profile_must_not_bypass_adaptation_research() -> None:
+    plan = ready_plan()
+    plan["compatibility"]["profile_id"] = "made-up-recommended-profile"
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+
+    with pytest.raises(ExecutionBlocked, match="必须先进入适配调研"):
         validate_executable_plan(plan)
 
 

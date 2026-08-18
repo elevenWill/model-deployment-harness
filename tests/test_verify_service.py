@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from scripts._common import HarnessError, file_sha256
+from scripts.run_inference import resolve_output_binding
 from scripts.verify_service import (
     _validate_inference_proof,
     _validate_semantic_review,
@@ -24,6 +26,15 @@ def _levels(status: str = "PASS") -> dict:
             "L5_real_inference",
             "L6_output_validation",
         )
+    }
+
+
+def _with_download(binding: dict, output: Path) -> dict:
+    return binding | {
+        "downloaded_at": "2026-08-17T00:01:01Z",
+        "download_sha256": file_sha256(output),
+        "download_content_length": str(output.stat().st_size),
+        "response_headers": {"content_length": str(output.stat().st_size)},
     }
 
 
@@ -65,8 +76,11 @@ def test_inference_proof_binds_request_response_endpoint_and_output(tmp_path: Pa
     response = tmp_path / "response.json"
     output = tmp_path / "output.mp4"
     request.write_text('{"prompt":"fixture"}')
-    response.write_text('{"id":"job-1","status":"completed"}')
     output.write_bytes(b"fixture-output")
+    response.write_text(
+        '{"id":"job-1","status":"completed","output":'
+        f'{{"id":"artifact-1","url":"/outputs/artifact-1","sha256":"{file_sha256(output)}"}}}}'
+    )
     artifact = lambda path, media: {  # noqa: E731 - compact fixture builder
         "path": str(path), "sha256": file_sha256(path), "media_type": media
     }
@@ -75,6 +89,18 @@ def test_inference_proof_binds_request_response_endpoint_and_output(tmp_path: Pa
         "review": {"plan_sha256": "a" * 64},
         "service": {"bind_host": "0.0.0.0", "port": 30011},
     }
+    recipe = {
+        "inference_api": {
+            "submit_paths": ["/v1/videos"],
+            "output_reference": {
+                "resolver": "json_pointer_fields",
+                "artifact_id_pointer": "/output/id",
+                "url_pointer": "/output/url",
+                "content_sha256_pointer": "/output/sha256",
+            },
+        }
+    }
+    raw_response = json.loads(response.read_text())
     proof = {
         "schema_version": "1.0",
         "producer": "HARNESS_HTTP_RUNNER",
@@ -91,15 +117,69 @@ def test_inference_proof_binds_request_response_endpoint_and_output(tmp_path: Pa
             "completed_at": "2026-08-17T00:01:00Z",
             "response": artifact(response, "application/json"), "runtime_error": None,
         },
+        "output_binding": _with_download(
+            resolve_output_binding(
+                raw_response,
+                "job-1",
+                recipe["inference_api"],
+                "http://127.0.0.1:30011/",
+            ),
+            output,
+        ),
         "output": artifact(output, "video/mp4"),
     }
-    duration = _validate_inference_proof(
-        proof, plan, output, {"inference_api": {"submit_paths": ["/v1/videos"]}}
-    )
+    duration = _validate_inference_proof(proof, plan, output, recipe)
     assert duration == 60
     proof["endpoint"] = "http://127.0.0.1:39999"
     with pytest.raises(HarnessError, match="端口"):
-        _validate_inference_proof(proof, plan, output)
+        _validate_inference_proof(proof, plan, output, recipe)
+
+
+def test_completed_response_from_another_output_cannot_validate_old_media(tmp_path: Path) -> None:
+    request = tmp_path / "request.json"
+    response = tmp_path / "response.json"
+    output = tmp_path / "old.mp4"
+    request.write_text('{"prompt":"fixture"}')
+    output.write_bytes(b"old-output")
+    response.write_text(json.dumps({
+        "id": "job-2", "status": "COMPLETED",
+        "output": {"id": "new-output", "url": "/outputs/new", "sha256": "0" * 64},
+    }))
+    artifact = lambda path, media: {  # noqa: E731
+        "path": str(path), "sha256": file_sha256(path), "media_type": media
+    }
+    recipe = {"inference_api": {
+        "submit_paths": ["/v1/videos"],
+        "output_reference": {
+            "resolver": "json_pointer_fields", "artifact_id_pointer": "/output/id",
+            "url_pointer": "/output/url", "content_sha256_pointer": "/output/sha256",
+        },
+    }}
+    proof = {
+        "schema_version": "1.0", "producer": "HARNESS_HTTP_RUNNER",
+        "deployment_id": "dep-1", "plan_sha256": "a" * 64,
+        "endpoint": "http://127.0.0.1:30011",
+        "request": {"method": "POST", "path": "/v1/videos",
+                    "payload": artifact(request, "application/json"),
+                    "submitted_at": "2026-08-17T00:00:00Z"},
+        "job": {"job_id": "job-2", "status": "COMPLETED",
+                "completed_at": "2026-08-17T00:01:00Z",
+                "response": artifact(response, "application/json"), "runtime_error": None},
+        "output_binding": _with_download(
+            resolve_output_binding(
+                json.loads(response.read_text()),
+                "job-2",
+                recipe["inference_api"],
+                "http://127.0.0.1:30011/",
+            ),
+            output,
+        ),
+        "output": artifact(output, "video/mp4"),
+    }
+    plan = {"deployment_id": "dep-1", "review": {"plan_sha256": "a" * 64},
+            "service": {"bind_host": "0.0.0.0", "port": 30011}}
+    with pytest.raises(HarnessError, match="原始完成响应声明"):
+        _validate_inference_proof(proof, plan, output, recipe)
 
 
 def test_semantic_review_is_bound_to_output_and_reviewer(tmp_path: Path) -> None:

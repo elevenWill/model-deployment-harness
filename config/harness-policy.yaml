@@ -44,6 +44,7 @@ requirement_gate:
     - identity.addresses
     - hardware.cpu
     - hardware.memory_bytes
+    - hardware.memory.available_bytes
     - hardware.gpus
     - hardware.gpu_topology
     - software.os
@@ -56,6 +57,39 @@ requirement_gate:
     - runtime.gpu_processes
     - runtime.model_services
   defaults_for_required_user_intent: forbidden
+
+compatibility_adaptation:
+  recommendation_mismatch_status: RESEARCH_NEEDED
+  untested_candidate_status: READY_FOR_TRIAL
+  verified_candidate_status: VALIDATED
+  adaptable_gap_categories:
+    - recommended_profile_mismatch
+    - gpu_model_or_topology_difference
+    - memory_pressure
+    - runtime_version_mismatch
+    - framework_gap
+  hard_gate_categories:
+    - license
+    - safety
+    - physical_capacity
+    - unavailable_target
+    - protected_change_required
+    - unverifiable
+  research_must_be_read_only: true
+  community_sources_are_leads_only: true
+  every_gap_requires_sa_mechanism_support_before_trial: true
+  plan_requires:
+    - official_baseline_evidence
+    - exact_target_applicability_checks
+    - hashed_request_artifact
+    - exact_host_observation_binding
+    - reviewed_capacity_trial_plan
+    - hashed_execution_and_verification_records
+    - complete_successful_execution_steps
+    - typed_inference_proof_and_semantic_review
+    - trusted_l5_l6_reconstruction
+    - successful_l5_l6_capacity_trial
+    - explicit_plan_conditions
 
 remote_execution:
   single_writer: true

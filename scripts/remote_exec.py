@@ -25,7 +25,7 @@ from scripts._common import (
     validate_instance,
 )
 from scripts.deployment_archive import DeploymentArchive
-from scripts.preflight import GateResult, host_preflight
+from scripts.preflight import GateResult, host_preflight, validate_assessment_artifacts
 from scripts.probe_host import (
     CommandResult,
     CommandTransport,
@@ -137,6 +137,361 @@ def _validate_lifecycle(plan: Mapping[str, Any]) -> None:
         raise ExecutionBlocked("研究生命周期源存在悬挂证据 ID")
     if sources["PLAN"]["plan_sha256"] != sources["PLAN_REVIEW"]["reviewed_plan_sha256"]:
         raise ExecutionBlocked("计划审核源未引用计划草案哈希")
+
+
+def _transitive_dependencies(step_id: str, steps: Mapping[str, Mapping[str, Any]]) -> set[str]:
+    """返回全部传递依赖，遇到悬挂引用或循环时失败关闭。"""
+    pending = list(steps[step_id].get("depends_on", []))
+    dependencies: set[str] = set()
+    while pending:
+        dependency = pending.pop()
+        if dependency == step_id:
+            raise ExecutionBlocked("执行步骤依赖形成循环")
+        if dependency in dependencies:
+            continue
+        referenced = steps.get(dependency)
+        if referenced is None:
+            raise ExecutionBlocked(f"执行步骤存在悬挂依赖：{dependency}")
+        dependencies.add(dependency)
+        pending.extend(referenced.get("depends_on", []))
+    return dependencies
+
+
+def _validate_adaptation_binding(plan: Mapping[str, Any]) -> None:
+    """把适配计划绑定到不可变评估及写入前检查。"""
+    adaptation = plan["compatibility"].get("adaptation")
+    if adaptation is None:
+        return
+    reference = adaptation["assessment_ref"]
+    assessment_path = _resolved_repo_file(reference["path"], ROOT)
+    if not hmac.compare_digest(file_sha256(assessment_path).lower(), reference["sha256"].lower()):
+        raise ExecutionBlocked("兼容性评估制品 SHA-256 不匹配")
+    try:
+        assessment = load_document(assessment_path)
+        validate_instance(assessment, "compatibility-assessment.schema.json")
+    except (HarnessError, OSError, ValueError) as exc:
+        raise ExecutionBlocked("兼容性评估制品无效") from exc
+    if (
+        assessment.get("assessment_id") != adaptation["assessment_id"]
+        or assessment.get("request_id") != plan["request_id"]
+        or assessment.get("host_id") != plan["target"]["host_id"]
+        or assessment.get("host_profile_observed_at") != plan["host_profile_observed_at"]
+    ):
+        raise ExecutionBlocked("兼容性评估未绑定到当前请求、主机和主机观测")
+    basis = plan["compatibility"]["basis"]
+    expected_status = "READY_FOR_TRIAL" if basis == "CAPACITY_TRIAL" else "VALIDATED"
+    assessment_gate = validate_assessment_artifacts(assessment, artifact_root=ROOT)
+    if assessment_gate.status != expected_status or assessment_gate.next_stage != "PLAN":
+        detail = "；".join(assessment_gate.blockers)
+        raise ExecutionBlocked(
+            f"{basis} 计划要求状态为 {expected_status} 的兼容性评估"
+            + (f"：{detail}" if detail else "")
+        )
+    request_ref = assessment["request_artifact"]
+    request_path = _resolved_repo_file(request_ref["path"], ROOT)
+    if not hmac.compare_digest(file_sha256(request_path).lower(), request_ref["sha256"].lower()):
+        raise ExecutionBlocked("适配评估的请求制品 SHA-256 不匹配")
+    try:
+        assessed_request = load_document(request_path)
+        validate_instance(assessed_request, "deployment-request.schema.json")
+    except (HarnessError, OSError, ValueError) as exc:
+        raise ExecutionBlocked("适配评估的请求制品无效") from exc
+    if (
+        assessed_request["request_id"] != plan["request_id"]
+        or assessed_request["target"]["gpu_ids"] != plan["target"]["gpu_ids"]
+        or assessed_request["model"]["id"] != plan["model"]["id"]
+        or assessed_request["model"]["variant"] != plan["model"]["variant"]
+        or assessed_request["framework_preference"] != plan["framework"]["name"]
+    ):
+        raise ExecutionBlocked("计划未绑定适配评估使用的精确请求")
+    research = assessment.get("research", {})
+    if research.get("selected_candidate_id") != adaptation["candidate_id"]:
+        raise ExecutionBlocked("计划引用的适配候选与评估选择不一致")
+    candidates = {item.get("candidate_id"): item for item in research.get("candidates", [])}
+    candidate = candidates.get(adaptation["candidate_id"])
+    if candidate is None:
+        raise ExecutionBlocked("计划引用了不存在的适配候选")
+    reproduction = candidate.get("local_reproduction", {})
+    trial_plan: Mapping[str, Any] | None = None
+    if basis == "CAPACITY_TRIAL":
+        if reproduction.get("status") != "NOT_RUN" or "trial_evidence" in reproduction:
+            raise ExecutionBlocked("容量试跑只能绑定尚未执行的候选方案")
+    else:
+        if reproduction.get("status") != "PASS":
+            raise ExecutionBlocked("适配候选缺少通过的目标主机试运行实证")
+        trial_evidence = reproduction.get("trial_evidence", {})
+        trial_plan_ref = trial_evidence.get("trial_plan", {})
+        if not isinstance(trial_plan_ref, Mapping):
+            raise ExecutionBlocked("适配候选缺少试运行计划引用")
+        trial_plan_path = _resolved_repo_file(str(trial_plan_ref.get("path", "")), ROOT)
+        if not hmac.compare_digest(
+            file_sha256(trial_plan_path).lower(), str(trial_plan_ref.get("sha256", "")).lower()
+        ):
+            raise ExecutionBlocked("适配试运行计划 SHA-256 不匹配")
+        try:
+            trial_plan = load_document(trial_plan_path)
+        except (HarnessError, OSError, ValueError) as exc:
+            raise ExecutionBlocked("适配试运行计划无法读取") from exc
+        if (
+            trial_plan.get("request_id") != plan["request_id"]
+            or trial_plan.get("deployment_id") != trial_evidence.get("trial_deployment_id")
+            or trial_plan.get("target", {}).get("host_id") != plan["target"]["host_id"]
+            or trial_plan.get("target", {}).get("gpu_ids") != plan["target"]["gpu_ids"]
+            or trial_plan.get("host_profile_observed_at") != plan["host_profile_observed_at"]
+            or trial_plan.get("model", {}).get("id") != plan["model"]["id"]
+            or trial_plan.get("model", {}).get("variant") != plan["model"]["variant"]
+            or trial_plan.get("framework", {}).get("name") != plan["framework"]["name"]
+            or trial_plan.get("framework", {}).get("version") != plan["framework"]["version"]
+        ):
+            raise ExecutionBlocked("适配试运行未绑定到当前请求、GPU、模型、主机观测和不可变运行时")
+    assessment_evidence = {item["evidence_id"]: item for item in assessment.get("evidence", [])}
+    plan_evidence = {item["evidence_id"]: item for item in plan["evidence"]}
+    trial_plan_evidence = (
+        {item["evidence_id"]: item for item in trial_plan.get("evidence", [])}
+        if trial_plan is not None
+        else assessment_evidence
+    )
+    for evidence_id in candidate.get("evidence_ids", []):
+        if (
+            evidence_id not in assessment_evidence
+            or plan_evidence.get(evidence_id) != assessment_evidence[evidence_id]
+            or trial_plan_evidence.get(evidence_id) != assessment_evidence[evidence_id]
+        ):
+            raise ExecutionBlocked("适配候选证据未被试运行和正式计划完整、原样引用")
+    bindings = adaptation["plan_conditions"]
+    if [item["condition"] for item in bindings] != candidate.get("plan_conditions"):
+        raise ExecutionBlocked("计划条件与已验证适配候选不一致")
+    condition_step_ids = [item["preflight_step_id"] for item in bindings]
+    if len(condition_step_ids) != len(set(condition_step_ids)):
+        raise ExecutionBlocked("每条适配计划条件必须绑定独立的执行前检查")
+    steps = {step["step_id"]: step for step in plan["steps"]}
+    for step_id in condition_step_ids:
+        step = steps.get(step_id)
+        if step is None or step["action"] != "inspect" or step["action_class"] != "READ_ONLY":
+            raise ExecutionBlocked("适配计划条件必须绑定只读 inspect 步骤")
+    required_checks = set(condition_step_ids)
+    for step in plan["steps"]:
+        dependencies = _transitive_dependencies(step["step_id"], steps)
+        if step["action_class"] != "READ_ONLY" and not required_checks.issubset(dependencies):
+            raise ExecutionBlocked("每个远程写步骤都必须依赖全部适配执行前检查")
+
+
+def _validate_compatibility_basis(plan: Mapping[str, Any]) -> None:
+    """阻止未登记硬件档案绕过适配调研与审核。"""
+    compatibility = plan["compatibility"]
+    basis = compatibility["basis"]
+    if basis in {"VALIDATED_ADAPTATION", "CAPACITY_TRIAL"} and "adaptation" not in compatibility:
+        raise ExecutionBlocked("适配或容量试跑必须绑定 CompatibilityAssessment")
+    if basis != "CATALOG_PROFILE":
+        return
+    _catalog_profile(plan)
+    _validate_catalog_limits(plan)
+
+
+def _catalog_profile(plan: Mapping[str, Any]) -> Mapping[str, Any]:
+    manifest_path = _resolved_repo_file(plan["model"]["recipe_ref"], ROOT / "models")
+    catalog_path = manifest_path.parent / "compatibility.yaml"
+    if not catalog_path.is_file():
+        raise ExecutionBlocked("模型缺少兼容性档案，必须先进入适配调研")
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+    profiles = {item.get("id"): item for item in catalog.get("profiles", [])}
+    profile = profiles.get(plan["compatibility"]["profile_id"])
+    if profile is None or profile.get("framework") != plan["framework"]["name"]:
+        raise ExecutionBlocked("目标配置不在模型兼容性档案中，必须先进入适配调研")
+    return profile
+
+
+def _validate_catalog_limits(plan: Mapping[str, Any]) -> None:
+    profile = _catalog_profile(plan)
+    limits = profile.get("limits")
+    expected_fields = {
+        "max_concurrency",
+        "max_short_edge",
+        "max_duration_seconds",
+        "allowed_variants",
+        "input_authorization",
+    }
+    if not isinstance(limits, Mapping) or set(limits) != expected_fields:
+        raise ExecutionBlocked("目录推理限制缺失或包含未知字段，必须先进入适配调研")
+    authorization = limits["input_authorization"]
+    if not isinstance(authorization, Mapping) or set(authorization) != {
+        "required_variants",
+        "input_kind",
+    }:
+        raise ExecutionBlocked("目录输入授权限制无法机器验证，必须先进入适配调研")
+    binding = plan["compatibility"].get("catalog_limits")
+    if not isinstance(binding, Mapping):
+        raise ExecutionBlocked("目录计划缺少精确 service/inference 限制绑定")
+    if (
+        binding.get("max_concurrency") != limits["max_concurrency"]
+        or binding.get("max_short_edge") != limits["max_short_edge"]
+        or binding.get("max_duration_seconds") != limits["max_duration_seconds"]
+        or binding.get("variant") != plan["model"]["variant"]
+        or binding.get("variant") not in limits["allowed_variants"]
+    ):
+        raise ExecutionBlocked("计划绑定的目录推理限制或模型变体不一致")
+    if plan["service"].get("max_concurrency") != binding.get("selected_concurrency"):
+        raise ExecutionBlocked("服务并发配置未绑定目录限制")
+    selected = (
+        ("selected_concurrency", "max_concurrency"),
+        ("selected_short_edge", "max_short_edge"),
+        ("selected_duration_seconds", "max_duration_seconds"),
+    )
+    if any(
+        not isinstance(binding.get(selected_field), (int, float))
+        or binding[selected_field] > limits[maximum_field]
+        for selected_field, maximum_field in selected
+    ):
+        raise ExecutionBlocked("计划的 service/inference 参数超过目录限制")
+    requires_authorization = plan["model"]["variant"] in authorization["required_variants"]
+    expected_input_kind = authorization["input_kind"] if requires_authorization else "none"
+    reference = binding.get("input_authorization_reference")
+    if binding.get("input_kind") != expected_input_kind or (
+        requires_authorization and not isinstance(reference, str)
+    ):
+        raise ExecutionBlocked("计划未绑定目录要求的参考输入授权")
+    if not requires_authorization and reference is not None:
+        raise ExecutionBlocked("无需参考输入的变体不得携带无关授权引用")
+
+
+def _validate_catalog_request_limits(
+    plan: Mapping[str, Any], request: Mapping[str, Any]
+) -> None:
+    if plan["compatibility"]["basis"] != "CATALOG_PROFILE":
+        return
+    _validate_catalog_limits(plan)
+    inference = request.get("inference")
+    binding = plan["compatibility"]["catalog_limits"]
+    if not isinstance(inference, Mapping) or (
+        inference.get("concurrency") != binding["selected_concurrency"]
+        or inference.get("short_edge") != binding["selected_short_edge"]
+        or inference.get("duration_seconds") != binding["selected_duration_seconds"]
+        or inference.get("input_authorization_reference")
+        != binding.get("input_authorization_reference")
+    ):
+        raise ExecutionBlocked("目录计划未绑定请求中的精确推理范围")
+    reference = binding.get("input_authorization_reference")
+    if reference is not None and plan["license_gate"].get("authorization_reference") != reference:
+        raise ExecutionBlocked("参考输入授权未同时绑定请求、许可门禁和计划")
+
+
+def _validate_catalog_profile_host(
+    plan: Mapping[str, Any], host_profile: Mapping[str, Any]
+) -> None:
+    """将实时选中 GPU 与目录中的每项明确条件逐一比较。"""
+    if plan["compatibility"]["basis"] != "CATALOG_PROFILE":
+        return
+    profile = _catalog_profile(plan)
+    gpu_requirement = profile.get("gpu")
+    topology_requirement = profile.get("topology")
+    if not isinstance(gpu_requirement, Mapping) or not isinstance(topology_requirement, Mapping):
+        raise ExecutionBlocked("兼容性档案缺少明确 GPU 或拓扑条件，必须先进入适配调研")
+    if set(gpu_requirement) - {"model", "count", "memory_gib_each"} or set(
+        topology_requirement
+    ) - {"kind", "allowed_link_prefixes"}:
+        raise ExecutionBlocked("目录包含执行器无法验证的物理条件，必须先进入适配调研")
+    all_gpus = host_profile.get("hardware", {}).get("gpus", [])
+    aliases: dict[object, Mapping[str, Any]] = {}
+    for gpu in all_gpus:
+        aliases[gpu["index"]] = gpu
+        aliases[gpu["uuid"]] = gpu
+    try:
+        selected = [aliases[gpu_id] for gpu_id in plan["target"]["gpu_ids"]]
+    except KeyError as exc:
+        raise ExecutionBlocked("目录兼容性检查找不到计划选择的 GPU") from exc
+    expected_count = gpu_requirement.get("count")
+    expected_model = str(gpu_requirement.get("model", ""))
+    expected_memory = gpu_requirement.get("memory_gib_each")
+    if (
+        not isinstance(expected_count, int)
+        or not isinstance(expected_memory, (int, float))
+        or len(selected) != expected_count
+    ):
+        raise ExecutionBlocked("目标 GPU 数量与目录兼容性档案不一致")
+    expected_model_token = re.sub(r"[^A-Z0-9]", "", expected_model.upper())
+    if not expected_model_token or any(
+        expected_model_token not in re.sub(r"[^A-Z0-9]", "", str(gpu["model"]).upper())
+        for gpu in selected
+    ):
+        raise ExecutionBlocked("目标 GPU 型号与目录兼容性档案不一致")
+    minimum_bytes = int(float(expected_memory) * 1024**3)
+    if any(gpu["memory_total_bytes"] < minimum_bytes for gpu in selected):
+        raise ExecutionBlocked("目标 GPU 显存低于目录兼容性档案要求")
+    host_ram = profile.get("host_ram")
+    if host_ram is not None:
+        if not isinstance(host_ram, Mapping) or set(host_ram) - {
+            "minimum_available_gib",
+            "recommended_total_gib",
+        }:
+            raise ExecutionBlocked("目录包含执行器无法验证的主机内存条件，必须先进入适配调研")
+        minimum_available_gib = host_ram.get("minimum_available_gib")
+        memory = host_profile.get("hardware", {}).get("memory")
+        if (
+            not isinstance(minimum_available_gib, (int, float))
+            or minimum_available_gib < 0
+            or not isinstance(memory, Mapping)
+            or not isinstance(memory.get("available_bytes"), int)
+        ):
+            raise ExecutionBlocked("主机观测缺少目录要求的可用内存事实，必须先进入适配调研")
+        required_available_bytes = int(float(minimum_available_gib) * 1024**3)
+        if memory["available_bytes"] < required_available_bytes:
+            raise ExecutionBlocked("主机可用内存低于目录兼容性档案要求，必须先进入适配调研")
+    topology_kind = topology_requirement.get("kind")
+    allowed_prefixes = topology_requirement.get("allowed_link_prefixes")
+    if topology_kind == "SINGLE_GPU":
+        if expected_count != 1 or allowed_prefixes != []:
+            raise ExecutionBlocked("单 GPU 目录拓扑条件无效")
+        return
+    if (
+        topology_kind != "FULL_MESH"
+        or not isinstance(allowed_prefixes, list)
+        or not allowed_prefixes
+    ):
+        raise ExecutionBlocked("多 GPU 目录拓扑条件无效，必须先进入适配调研")
+    position_by_alias: dict[object, int] = {}
+    for position, gpu in enumerate(selected):
+        position_by_alias[gpu["index"]] = position
+        position_by_alias[gpu["uuid"]] = position
+    observed_pairs: dict[frozenset[int], str] = {}
+    for link in host_profile.get("hardware", {}).get("gpu_topology", []):
+        a = position_by_alias.get(link["gpu_a"])
+        b = position_by_alias.get(link["gpu_b"])
+        if a is not None and b is not None and a != b:
+            observed_pairs[frozenset((a, b))] = str(link["link"])
+    expected_pairs = {
+        frozenset((a, b)) for a in range(expected_count) for b in range(a + 1, expected_count)
+    }
+    if set(observed_pairs) != expected_pairs or any(
+        not any(link.startswith(str(prefix)) for prefix in allowed_prefixes)
+        for link in observed_pairs.values()
+    ):
+        raise ExecutionBlocked("目标 GPU 拓扑与目录兼容性档案不一致")
+
+
+def _validate_capacity_trial_actions(plan: Mapping[str, Any]) -> None:
+    if plan["purpose"] != "CAPACITY_TRIAL":
+        return
+    allowed = {
+        "inspect",
+        "create_target_directory",
+        "create_isolated_venv",
+        "stage_source_bundle",
+        "clone_source_checkout",
+        "checkout_source_revision",
+        "install_isolated_dependencies",
+        "pull_container",
+        "download_model",
+        "create_service_config",
+        "start_own_service",
+        "stop_own_service",
+    }
+    actions = {
+        step["action"]
+        for collection in (plan["steps"], plan["rollback"]["steps"])
+        for step in collection
+    }
+    if not actions.issubset(allowed):
+        raise ExecutionBlocked("容量试跑包含超出隔离部署与自有服务范围的动作")
 
 
 def _validate_framework_evidence_and_recipe(plan: Mapping[str, Any]) -> dict[str, Any]:
@@ -796,6 +1151,9 @@ def validate_executable_plan(
     if plan.get("license_gate", {}).get("status") != policy["license_gate"]["allowed_ready_status"]:
         raise ExecutionBlocked("许可门禁未通过")
     _validate_lifecycle(plan)
+    _validate_compatibility_basis(plan)
+    _validate_adaptation_binding(plan)
+    _validate_capacity_trial_actions(plan)
     framework_recipe = _validate_framework_evidence_and_recipe(plan)
     actual_hash = canonical_plan_sha256(plan)
     if not hmac.compare_digest(review.get("plan_sha256", ""), actual_hash):
@@ -948,6 +1306,8 @@ def authorize_execution(
     if mismatches:
         raise ExecutionBlocked("计划/请求/主机制品不匹配：" + "、".join(mismatches))
     _validate_license_binding(plan, request)
+    _validate_catalog_request_limits(plan, request)
+    _validate_catalog_profile_host(plan, host_profile)
     reviewed_cuda = plan["compatibility"]["required_cuda"]
     if required_cuda is not None and required_cuda != reviewed_cuda:
         raise ExecutionBlocked("CLI CUDA 要求与已审核计划不一致")
@@ -1043,6 +1403,9 @@ def _live_preflight(
     if requested_values and not requested_values.intersection(live_values):
         raise ExecutionBlocked("实时 SSH 主机与用户提供的选择器不一致")
     environment = plan["environment"]
+    if plan["compatibility"]["basis"] == "CATALOG_PROFILE":
+        _validate_catalog_limits(plan)
+    _validate_catalog_profile_host(plan, live_profile)
     gate = host_preflight(
         request,
         live_profile,

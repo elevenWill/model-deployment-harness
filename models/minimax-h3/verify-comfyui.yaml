@@ -22,6 +22,12 @@ inference_api:
   submit_path: /prompt
   status_path_template: /history/{id}
   content_path_template: /view?filename={filename}&subfolder={subfolder}&type={type}
+  output_reference:
+    resolver: comfyui_output_item
+    job_token:
+      request_pointer: /prompt/42/inputs/filename_prefix
+      prefix: harness-h3-
+      max_download_delay_seconds: 30
   completed_history_requires_outputs: true
   output_item_keys: [gifs, videos]
   output_extension: .mp4

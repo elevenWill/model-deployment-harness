@@ -12,7 +12,11 @@ inference_api:
   submit_paths: [/v1/videos]
   submit_path: /v1/videos
   status_path_template: /v1/videos/{id}
-  content_path_template: /v1/videos/{id}/content
+  output_reference:
+    resolver: json_pointer_fields
+    artifact_id_pointer: /output/id
+    url_pointer: /output/url
+    content_sha256_pointer: /output/sha256
 output_validation:
   container: mp4
   non_empty: true
