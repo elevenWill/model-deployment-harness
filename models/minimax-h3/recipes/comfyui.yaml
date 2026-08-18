@@ -4,6 +4,7 @@ framework:
   name: comfyui
   component: ComfyUI
   source: https://github.com/Comfy-Org/ComfyUI.git
+  source_tree: e2791b95dc97f50ef97a22499131160b605edd47
   documentation_commit: 0d80858061b511bd38c8cef4c235ef8e01040822
   deployment_pin: 0d80858061b511bd38c8cef4c235ef8e01040822
   pin_required_before_ready: true
@@ -21,7 +22,30 @@ research:
 runtime:
   source_checkout_subdirectory: ComfyUI
   isolated_venv_subdirectory: .venv
-  dependency_command: uv pip install --python {install_root}/.venv/bin/python -r {runtime_root}/requirements.txt modelscope==1.31.0
+  dependency_command: isolated CUDA 12.1 PyTorch plus pure-Python comfy-kitchen, then pinned ComfyUI requirements and ModelScope client
+  dependency_argv:
+    - "{bootstrap_uv}"
+    - pip
+    - install
+    - --python
+    - "{venv_python}"
+    - --index-url
+    - https://download.pytorch.org/whl/cu121
+    - --extra-index-url
+    - https://pypi.org/simple
+    - torch==2.5.1
+    - torchvision==0.20.1
+    - torchaudio==2.5.1
+    - https://files.pythonhosted.org/packages/27/d1/e53410260b81610233cb56c2fac1a9f3d39887be3cbb983cd8baa6a07528/comfy_kitchen-0.2.31-py3-none-any.whl#sha256=5117946c30f308cfc73b9c26f723ae3918308bd090e57a8eae298406934aabd6
+    - -r
+    - "{runtime_root}/requirements.txt"
+    - setuptools==80.9.0
+    - modelscope==1.31.0
+  cuda12_eager:
+    pytorch: 2.5.1-cu121
+    comfy_kitchen: 0.2.31-pure-python
+    rationale: GPU 1 driver 535.104 supports CUDA 12.x but cannot load a CUDA 13 wheel; ComfyUI disables the CUDA backend below cu130 and uses the audited eager fallback.
+    limitations: 仅实验路径；必须完成两种变体的 L5/L6 验证，不能承诺吞吐或输出与 cu130 位级一致。
   no_system_python_changes: true
   execution_precondition:
     requires_preinstalled_uv: true

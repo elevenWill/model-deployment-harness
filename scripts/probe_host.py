@@ -181,6 +181,19 @@ class ParamikoTransport:
     def close(self) -> None:
         self._client.close()
 
+    def upload_new(self, source: Path, destination: str, *, timeout: int = 300) -> None:
+        """Upload only to a previously absent target, without replacing remote files."""
+        if not source.is_file():
+            raise FileNotFoundError(source)
+        sftp = self._client.open_sftp()
+        try:
+            with source.open("rb") as local, sftp.open(destination, "x+b") as remote:
+                while chunk := local.read(1024 * 1024):
+                    remote.write(chunk)
+                remote.flush()
+        finally:
+            sftp.close()
+
 
 PROBE_COMMANDS: dict[str, tuple[str, ...]] = {
     "hostname": ("hostname",),

@@ -75,6 +75,7 @@ remote_execution:
   plan_allowed_writes:
     - create_target_directory
     - create_isolated_venv
+    - stage_source_bundle
     - clone_source_checkout
     - checkout_source_revision
     - install_isolated_dependencies
@@ -107,9 +108,10 @@ remote_execution:
     stale_lock_removal: forbidden
   command_policy:
     shell_interpreters_forbidden: [sh, bash, zsh, dash, fish, csh, tcsh]
-    inspect: [test, systemctl]
+    inspect: [test, systemctl, sha256sum, git]
     create_target_directory: [mkdir]
     create_isolated_venv: [python, python3, uv]
+    stage_source_bundle: [sftp-upload]
     pull_container: [docker, podman]
     clone_source_checkout: [git]
     checkout_source_revision: [git]

@@ -171,6 +171,25 @@ def _validate_framework_evidence_and_recipe(plan: Mapping[str, Any]) -> dict[str
         raise ExecutionBlocked("框架没有已实现的可执行文件绑定")
     if runtime["executable"] != expected_executable:
         raise ExecutionBlocked("框架可执行文件未绑定到已审核 checkout")
+    source_bundle = runtime.get("source_bundle")
+    if source_bundle is not None:
+        source_tree = recipe.get("framework", {}).get("source_tree")
+        if (
+            not isinstance(source_tree, str)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}", source_tree)
+            or source_bundle["tree"].lower() != source_tree.lower()
+            or not _under_remote_root(
+                source_bundle["remote_path"], (plan["target"]["install_root"],)
+            )
+            or source_bundle["remote_path"] == runtime["location"]
+        ):
+            raise ExecutionBlocked("本地暂存源码包必须绑定配方固定 tree 且位于 install_root")
+        local_bundle = Path(source_bundle["local_path"])
+        if (
+            not local_bundle.is_file()
+            or file_sha256(local_bundle).lower() != source_bundle["sha256"].lower()
+        ):
+            raise ExecutionBlocked("本地暂存源码包缺失或 SHA-256 不匹配")
     evidence = {item["evidence_id"]: item for item in plan["evidence"]}
     for evidence_id in framework["evidence_ids"]:
         item = evidence.get(evidence_id)
@@ -206,6 +225,25 @@ def _comfy_bootstrap(plan: Mapping[str, Any]) -> tuple[str, str]:
     ):
         raise ExecutionBlocked("ComfyUI 独立 uv/Python 路径无效")
     return uv_path, python_path
+
+
+def _comfy_dependency_argv(
+    framework_recipe: Mapping[str, Any], plan: Mapping[str, Any]
+) -> tuple[str, ...]:
+    """Expand the reviewed ComfyUI dependency argv without using a shell."""
+    template = framework_recipe.get("runtime", {}).get("dependency_argv")
+    if not isinstance(template, list) or not all(isinstance(item, str) for item in template):
+        raise ExecutionBlocked("ComfyUI 配方缺少固定的隔离依赖安装 argv")
+    uv_path, _python_path = _comfy_bootstrap(plan)
+    values = {
+        "bootstrap_uv": uv_path,
+        "venv_python": str(PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/python"),
+        "runtime_root": plan["framework"]["runtime_artifact"]["location"],
+    }
+    try:
+        return tuple(item.format(**values) for item in template)
+    except KeyError as exc:
+        raise ExecutionBlocked("ComfyUI 依赖 argv 包含未知占位符") from exc
 
 
 def _scope_authorizes(step: Mapping[str, Any]) -> bool:
@@ -257,10 +295,50 @@ def _validate_step_command(
             if plan["framework"]["name"] == "comfyui":
                 comfy_bootstrap_paths = _comfy_bootstrap(plan)
             allowed_paths = (*roots, *comfy_bootstrap_paths)
-            if len(argv) != 3 or argv[1] not in {"-d", "-e", "-f", "-x"} or not any(
-                _under_remote_root(argv[2], (root,)) for root in allowed_paths
-            ):
+            normal_test = (
+                len(argv) == 3
+                and argv[1] in {"-d", "-e", "-f", "-x"}
+                and any(_under_remote_root(argv[2], (root,)) for root in allowed_paths)
+            )
+            absent_source_bundle = (
+                len(argv) == 4
+                and tuple(argv[1:3]) == ("!", "-e")
+                and isinstance(plan["framework"]["runtime_artifact"].get("source_bundle"), Mapping)
+                and argv[3] == plan["framework"]["runtime_artifact"]["source_bundle"]["remote_path"]
+            )
+            if not normal_test and not absent_source_bundle:
                 raise ExecutionBlocked("计划 inspect 步骤仅限对目标根目录执行 test")
+        elif executable == "sha256sum":
+            bundle = plan["framework"]["runtime_artifact"].get("source_bundle")
+            if isinstance(bundle, Mapping) and argv == ("sha256sum", bundle["remote_path"]):
+                pass
+            else:
+                manifest = _model_manifest(plan)
+                assets = manifest.get("comfyui_assets", {}).get("master_integrity", {})
+                files = tuple(
+                    manifest.get("comfyui_assets", {})
+                    .get("variants", {})
+                    .get(plan["model"]["variant"], {})
+                    .get("files", ())
+                )
+                expected = (
+                    "sha256sum",
+                    *(str(PurePosixPath(plan["target"]["model_root"]) / path) for path in files),
+                )
+                if argv != expected or not all(path in assets for path in files):
+                    raise ExecutionBlocked("仅允许校验已审核的暂存源码包或 ModelScope 资产 SHA-256")
+        elif executable == "git":
+            runtime = plan["framework"]["runtime_artifact"]
+            expected = (
+                "git",
+                "-C",
+                runtime["location"],
+                "rev-parse",
+                "HEAD^{tree}",
+            )
+            source_tree = framework_recipe.get("framework", {}).get("source_tree")
+            if not isinstance(source_tree, str) or argv != expected:
+                raise ExecutionBlocked("仅允许校验已审核源码 checkout 的固定 tree")
         elif plan["framework"]["name"] != "comfyui" or argv != (
             "systemctl",
             "--user",
@@ -285,13 +363,32 @@ def _validate_step_command(
             destination, (plan["target"]["install_root"],)
         ):
             raise ExecutionBlocked("隔离 venv 的命令/路径与声明动作不一致")
+    elif action == "stage_source_bundle":
+        bundle = plan["framework"]["runtime_artifact"].get("source_bundle")
+        expected = (
+            (
+                "sftp-upload",
+                bundle["local_path"],
+                bundle["remote_path"],
+            )
+            if isinstance(bundle, Mapping)
+            else ()
+        )
+        if argv != expected:
+            raise ExecutionBlocked("暂存源码包上传必须精确绑定已审核的本地与远端路径")
     elif action == "clone_source_checkout":
         runtime = plan["framework"]["runtime_artifact"]
+        bundle = runtime.get("source_bundle")
+        source = (
+            bundle["remote_path"]
+            if isinstance(bundle, Mapping)
+            else framework_recipe["framework"]["source"]
+        )
         expected = (
             "git",
             "clone",
             "--no-checkout",
-            framework_recipe["framework"]["source"],
+            source,
             runtime["location"],
         )
         if argv != expected or not _under_remote_root(
@@ -306,16 +403,19 @@ def _validate_step_command(
     elif action == "install_isolated_dependencies":
         runtime = plan["framework"]["runtime_artifact"]
         venv_python = str(PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/python")
-        tool = _comfy_bootstrap(plan)[0] if plan["framework"]["name"] == "comfyui" else "uv"
         expected = (
-            tool,
-            "pip",
-            "install",
-            "--python",
-            venv_python,
-            "-r",
-            str(PurePosixPath(runtime["location"]) / "requirements.txt"),
-            "modelscope==1.31.0",
+            _comfy_dependency_argv(framework_recipe, plan)
+            if plan["framework"]["name"] == "comfyui"
+            else (
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                venv_python,
+                "-r",
+                str(PurePosixPath(runtime["location"]) / "requirements.txt"),
+                "modelscope==1.31.0",
+            )
         )
         if argv != expected:
             raise ExecutionBlocked(
@@ -351,25 +451,29 @@ def _validate_step_command(
                 .get(plan["model"]["variant"], {})
             )
             destination = _argument_after(argv, "--local_dir")
-            includes = tuple(
-                argv[index + 1] for index, item in enumerate(argv[:-1]) if item == "--include"
-            )
+            allowed_files = tuple(assets.get("files", ()))
             expected_prefix = (
                 str(PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/modelscope"),
                 "download",
                 "--model",
                 source.get("repository"),
             )
+            mutable_revision = source.get("mutable_revision")
+            valid_revision = bool(revision and re.fullmatch(r"[0-9a-fA-F]{40}", revision))
+            valid_revision = valid_revision or revision == mutable_revision == "master"
             if (
                 argv[:4] != expected_prefix
-                or not revision
-                or not re.fullmatch(r"[0-9a-fA-F]{40}", revision)
+                or not valid_revision
                 or destination != plan["target"]["model_root"]
                 or not _under_remote_root(destination, (plan["target"]["model_root"],))
-                or includes != tuple(assets.get("files", ()))
+                or tuple(argv[:8])
+                != (*expected_prefix, "--revision", revision, "--local_dir", destination)
+                or not tuple(argv[8:])
+                or len(set(argv[8:])) != len(argv[8:])
+                or not set(argv[8:]).issubset(set(allowed_files))
             ):
                 raise ExecutionBlocked(
-                    "ModelScope 下载必须固定仓库/revision，并精确下载所选变体的允许量化文件"
+                    "ModelScope 下载必须使用精确仓库/revision和位置参数文件白名单"
                 )
         else:  # pragma: no cover - command policy guards this branch
             raise ExecutionBlocked("未实现的模型下载客户端")
@@ -508,16 +612,16 @@ def _validate_comfyui_plan_shape(plan: Mapping[str, Any]) -> None:
     uv_path, python_path = _comfy_bootstrap(plan)
     steps = list(plan["steps"])
     action_set = {step["action"] for step in steps}
-    required = {
-        "inspect",
-        "clone_source_checkout",
-        "checkout_source_revision",
-        "create_isolated_venv",
-        "install_isolated_dependencies",
-        "download_model",
-        "create_service_config",
-        "start_own_service",
-    }
+    required = {"inspect", "install_isolated_dependencies", "start_own_service"}
+    runtime = plan["framework"]["runtime_artifact"]
+    reusing_checkout = runtime.get("reuse_verified_checkout") is True
+    reusing_model_assets = runtime.get("reuse_verified_model_assets") is True
+    if not reusing_model_assets:
+        required.update({"download_model", "create_service_config"})
+    if not reusing_checkout:
+        required.update(
+            {"clone_source_checkout", "checkout_source_revision", "create_isolated_venv"}
+        )
     if not required.issubset(action_set):
         raise ExecutionBlocked(
             "ComfyUI 计划缺少隔离运行时、ModelScope、user systemd 或服务启动步骤"
@@ -540,15 +644,136 @@ def _validate_comfyui_plan_shape(plan: Mapping[str, Any]) -> None:
         if tuple(step["command"]) in {("test", "-x", uv_path), ("test", "-x", python_path)}
     }
     venv_steps = [step for step in steps if step["action"] == "create_isolated_venv"]
-    if (
+    if not reusing_checkout and (
         len(bootstrap_checks) != 2
         or len(venv_steps) != 1
         or not bootstrap_checks.issubset(venv_steps[0].get("depends_on", []))
     ):
         raise ExecutionBlocked("ComfyUI 创建隔离环境前必须检查已审核的 uv 与 Python 路径")
+    if reusing_checkout:
+        expected_tree_check = (
+            "git",
+            "-C",
+            runtime["location"],
+            "rev-parse",
+            "HEAD^{tree}",
+        )
+        tree_steps = [step for step in steps if tuple(step["command"]) == expected_tree_check]
+        venv_path = str(PurePosixPath(plan["target"]["install_root"]) / ".venv/bin/python")
+        venv_checks = [
+            step for step in steps if tuple(step["command"]) == ("test", "-x", venv_path)
+        ]
+        dependency_steps = [
+            step for step in steps if step["action"] == "install_isolated_dependencies"
+        ]
+        if (
+            len(tree_steps) != 1
+            or len(venv_checks) != 1
+            or len(dependency_steps) != 1
+            or tree_steps[0]["step_id"] not in dependency_steps[0].get("depends_on", [])
+            or venv_checks[0]["step_id"] not in dependency_steps[0].get("depends_on", [])
+        ):
+            raise ExecutionBlocked("复用 checkout/venv 前必须重新校验 tree 与隔离 Python")
     rollback = plan["rollback"]["steps"]
     if len(rollback) != 1 or rollback[0]["action"] != "stop_own_service":
         raise ExecutionBlocked("ComfyUI 计划必须有且仅有一个停止自有 user unit 的回滚步骤")
+    model_steps = [step for step in steps if step["action"] == "download_model"]
+    if (model_steps or reusing_model_assets) and (
+        reusing_model_assets
+        or all(_argument_after(step["command"], "--revision") == "master" for step in model_steps)
+    ):
+        manifest = _model_manifest(plan)
+        assets = manifest.get("comfyui_assets", {}).get("master_integrity", {})
+        files = tuple(
+            manifest.get("comfyui_assets", {})
+            .get("variants", {})
+            .get(plan["model"]["variant"], {})
+            .get("files", ())
+        )
+        expected = (
+            "sha256sum",
+            *(str(PurePosixPath(plan["target"]["model_root"]) / path) for path in files),
+        )
+        checks = [step for step in steps if tuple(step["command"]) == expected]
+        if reusing_model_assets:
+            service_config = next(step for step in steps if step["action"] == "start_own_service")
+        else:
+            service_config = next(
+                step for step in steps if step["action"] == "create_service_config"
+            )
+        requested_files = tuple(file for step in model_steps for file in tuple(step["command"])[8:])
+        expected_model_link = (
+            "test",
+            "-e",
+            str(PurePosixPath(plan["target"]["install_root"]) / "models"),
+        )
+        model_link_checks = [
+            step for step in steps if tuple(step["command"]) == expected_model_link
+        ]
+        if (
+            len(checks) != 1
+            or not all(path in assets for path in files)
+            or (
+                not reusing_model_assets
+                and (
+                    requested_files != files
+                    or len(set(requested_files)) != len(requested_files)
+                    or not {step["step_id"] for step in model_steps}.issubset(
+                        checks[0].get("depends_on", [])
+                    )
+                )
+            )
+            or (reusing_model_assets and len(model_link_checks) != 1)
+            or checks[0]["step_id"] not in service_config.get("depends_on", [])
+        ):
+            raise ExecutionBlocked("可变 ModelScope master 下载必须在建服务前逐文件校验 SHA-256")
+    bundle = plan["framework"]["runtime_artifact"].get("source_bundle")
+    if isinstance(bundle, Mapping):
+        by_id = {step["step_id"]: step for step in steps}
+        required_bundle_steps = {
+            "source-bundle-absent",
+            "stage-source-bundle",
+            "verify-source-bundle",
+            "verify-source-tree",
+        }
+        if not required_bundle_steps.issubset(by_id):
+            raise ExecutionBlocked("暂存源码包计划缺少排他上传、哈希或 tree 校验步骤")
+        if (
+            tuple(by_id["source-bundle-absent"]["command"])
+            != (
+                "test",
+                "!",
+                "-e",
+                bundle["remote_path"],
+            )
+            or tuple(by_id["stage-source-bundle"]["command"])
+            != (
+                "sftp-upload",
+                bundle["local_path"],
+                bundle["remote_path"],
+            )
+            or tuple(by_id["verify-source-bundle"]["command"])
+            != (
+                "sha256sum",
+                bundle["remote_path"],
+            )
+            or tuple(by_id["verify-source-tree"]["command"])
+            != (
+                "git",
+                "-C",
+                plan["framework"]["runtime_artifact"]["location"],
+                "rev-parse",
+                "HEAD^{tree}",
+            )
+        ):
+            raise ExecutionBlocked("暂存源码包计划命令与固定校验契约不一致")
+        if (
+            "source-bundle-absent" not in by_id["stage-source-bundle"].get("depends_on", [])
+            or "stage-source-bundle" not in by_id["verify-source-bundle"].get("depends_on", [])
+            or "verify-source-bundle" not in by_id["clone-source"].get("depends_on", [])
+            or "checkout-source" not in by_id["verify-source-tree"].get("depends_on", [])
+        ):
+            raise ExecutionBlocked("暂存源码包步骤依赖顺序不安全")
 
 
 def validate_executable_plan(
@@ -840,6 +1065,84 @@ def _probe_runtime_artifact(plan: Mapping[str, Any], transport: CommandTransport
         raise ExecutionBlocked("已安装框架运行时与已审核不可变 pin 不一致")
 
 
+def _stage_source_bundle(
+    plan: Mapping[str, Any], transport: CommandTransport, *, timeout: int
+) -> CommandResult:
+    bundle = plan["framework"]["runtime_artifact"].get("source_bundle")
+    if not isinstance(bundle, Mapping):  # defensive: validated before execution
+        raise ExecutionBlocked("暂存源码包步骤未绑定来源制品")
+    upload_new = getattr(transport, "upload_new", None)
+    if not callable(upload_new):
+        raise ExecutionBlocked("SSH 传输不支持排他暂存源码包上传")
+    try:
+        upload_new(Path(bundle["local_path"]), bundle["remote_path"], timeout=timeout)
+    except Exception as exc:
+        raise ExecutionBlocked(f"暂存源码包上传失败：{exc.__class__.__name__}") from exc
+    return CommandResult(
+        ("sftp-upload", bundle["local_path"], bundle["remote_path"]),
+        0,
+        "source bundle uploaded exclusively\n",
+        "",
+    )
+
+
+def _validate_source_bundle_observation(
+    plan: Mapping[str, Any], step: Mapping[str, Any], result: CommandResult
+) -> None:
+    bundle = plan["framework"]["runtime_artifact"].get("source_bundle")
+    if not isinstance(bundle, Mapping):
+        return
+    if step["step_id"] == "verify-source-bundle":
+        observed = result.stdout.strip().split(maxsplit=1)
+        if not observed or not hmac.compare_digest(observed[0].lower(), bundle["sha256"].lower()):
+            raise ExecutionBlocked("远端暂存源码包 SHA-256 不匹配")
+
+
+def _validate_source_tree_observation(
+    plan: Mapping[str, Any],
+    framework_recipe: Mapping[str, Any],
+    step: Mapping[str, Any],
+    result: CommandResult,
+) -> None:
+    if step["step_id"] != "verify-source-tree":
+        return
+    source_tree = framework_recipe.get("framework", {}).get("source_tree")
+    if not isinstance(source_tree, str) or not hmac.compare_digest(
+        result.stdout.strip().lower(), source_tree.lower()
+    ):
+        raise ExecutionBlocked("远端 checkout tree 与官方固定 tree 不匹配")
+
+
+def _validate_model_asset_observation(
+    plan: Mapping[str, Any], step: Mapping[str, Any], result: CommandResult
+) -> None:
+    if step["step_id"] != "verify-model-assets":
+        return
+    manifest = _model_manifest(plan)
+    assets = manifest.get("comfyui_assets", {}).get("master_integrity", {})
+    expected = {
+        str(PurePosixPath(plan["target"]["model_root"]) / path): details["sha256"].lower()
+        for path, details in assets.items()
+    }
+    observed: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2:
+            observed[parts[1].strip()] = parts[0].lower()
+    files = tuple(
+        manifest.get("comfyui_assets", {})
+        .get("variants", {})
+        .get(plan["model"]["variant"], {})
+        .get("files", ())
+    )
+    if any(
+        observed.get(str(PurePosixPath(plan["target"]["model_root"]) / path))
+        != expected.get(str(PurePosixPath(plan["target"]["model_root"]) / path))
+        for path in files
+    ):
+        raise ExecutionBlocked("ModelScope 下载资产 SHA-256 与官方 API manifest 不匹配")
+
+
 def _plan_bootstraps_runtime(plan: Mapping[str, Any]) -> bool:
     return any(
         step["action"] in {"clone_source_checkout", "checkout_source_revision"}
@@ -862,6 +1165,7 @@ def _execute_plan_unrecorded(
 ) -> ExecutionResult:
     """按顺序执行精确计划 argv，任一失败或漂移即停止。"""
     validate_executable_plan(plan)
+    framework_recipe = _validate_framework_evidence_and_recipe(plan)
     authorize_execution(plan, request, host_profile, required_cuda=required_cuda)
     process_env = dict(environ if environ is not None else os.environ)
     file_env = secret_environment({}, dotenv_path)
@@ -914,9 +1218,15 @@ def _execute_plan_unrecorded(
             argv = tuple(step["command"])
             step_started_at = datetime.now(timezone.utc).isoformat()
             try:
-                result: CommandResult = transport.run(
-                    argv, timeout=timeout, cwd=step.get("working_directory"), env=step_env
+                result: CommandResult = (
+                    _stage_source_bundle(plan, transport, timeout=timeout)
+                    if step["action"] == "stage_source_bundle"
+                    else transport.run(
+                        argv, timeout=timeout, cwd=step.get("working_directory"), env=step_env
+                    )
                 )
+            except ExecutionBlocked:
+                raise
             except Exception as exc:
                 raise ExecutionBlocked(
                     f"{step['step_id']} 的 SSH 执行失败：{exc.__class__.__name__}"
@@ -938,6 +1248,9 @@ def _execute_plan_unrecorded(
                     tuple(results),
                     f"步骤 {step['step_id']} 以退出状态 {result.returncode} 失败",
                 )
+            _validate_source_bundle_observation(plan, step, result)
+            _validate_source_tree_observation(plan, framework_recipe, step, result)
+            _validate_model_asset_observation(plan, step, result)
             completed.add(step["step_id"])
             if step["action"] == "checkout_source_revision":
                 _probe_runtime_artifact(plan, transport)
@@ -1126,6 +1439,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--required-cuda")
     parser.add_argument("--env-file", type=Path, default=Path.cwd() / ".env")
     parser.add_argument("--lock-directory", type=Path, default=Path("/tmp"))
+    parser.add_argument("--timeout", type=int, default=7200)
     return parser
 
 
@@ -1166,6 +1480,7 @@ def main(argv: list[str] | None = None) -> int:
             required_cuda=args.required_cuda,
             dotenv_path=args.env_file,
             lock_directory=args.lock_directory,
+            timeout=args.timeout,
             archive=archive,
         )
         summary = {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 
 import pytest
 
@@ -294,6 +295,25 @@ def ready_comfyui_plan():
         "vae/minimax_h3_audio_vae_fp32.safetensors",
         "vae/minimax_h3_video_vae_fp16.safetensors",
     ]
+    dependency_argv = [
+        bootstrap_uv,
+        "pip",
+        "install",
+        "--python",
+        venv_python,
+        "--index-url",
+        "https://download.pytorch.org/whl/cu121",
+        "--extra-index-url",
+        "https://pypi.org/simple",
+        "torch==2.5.1",
+        "torchvision==0.20.1",
+        "torchaudio==2.5.1",
+        "https://files.pythonhosted.org/packages/27/d1/e53410260b81610233cb56c2fac1a9f3d39887be3cbb983cd8baa6a07528/comfy_kitchen-0.2.31-py3-none-any.whl#sha256=5117946c30f308cfc73b9c26f723ae3918308bd090e57a8eae298406934aabd6",
+        "-r",
+        f"{runtime_root}/requirements.txt",
+        "setuptools==80.9.0",
+        "modelscope==1.31.0",
+    ]
     commands = [
         ("bootstrap-uv", "inspect", ["test", "-x", bootstrap_uv]),
         ("bootstrap-python", "inspect", ["test", "-x", bootstrap_python]),
@@ -322,16 +342,7 @@ def ready_comfyui_plan():
         (
             "deps",
             "install_isolated_dependencies",
-            [
-                bootstrap_uv,
-                "pip",
-                "install",
-                "--python",
-                venv_python,
-                "-r",
-                f"{runtime_root}/requirements.txt",
-                "modelscope==1.31.0",
-            ],
+            dependency_argv,
         ),
         (
             "download",
@@ -345,7 +356,7 @@ def ready_comfyui_plan():
                 "a" * 40,
                 "--local_dir",
                 model_root,
-                *sum((["--include", item] for item in model_files), []),
+                *model_files,
             ],
         ),
         (
@@ -425,6 +436,7 @@ def ready_comfyui_plan():
 class FakeTransport:
     def __init__(self, returncode=0, raised=None):
         self.calls = []
+        self.uploads = []
         self.returncode = returncode
         self.raised = raised
 
@@ -442,8 +454,138 @@ class FakeTransport:
             return CommandResult(tuple(argv), 0, "a54de989c8ba817ebb603c5443e694e5fcf7edb1\n", "")
         return CommandResult(tuple(argv), self.returncode, "ok", "")
 
+    def upload_new(self, source, destination, *, timeout=300):
+        self.uploads.append((source, destination, timeout))
+
     def close(self):
         pass
+
+
+def test_staged_source_bundle_requires_exclusive_transfer_and_hashes(tmp_path):
+    plan = ready_comfyui_plan()
+    bundle = tmp_path / "comfyui.bundle"
+    bundle.write_bytes(b"verified source bundle")
+    bundle_sha = file_sha256(bundle)
+    tree = "e2791b95dc97f50ef97a22499131160b605edd47"
+    runtime = plan["framework"]["runtime_artifact"]
+    runtime["source_bundle"] = {
+        "local_path": str(bundle),
+        "remote_path": "/opt/h3/.comfyui.bundle",
+        "sha256": bundle_sha,
+        "tree": tree,
+    }
+    replacements = {
+        "clone": (
+            "clone-source",
+            "clone_source_checkout",
+            ["git", "clone", "--no-checkout", "/opt/h3/.comfyui.bundle", "/opt/h3/ComfyUI"],
+        ),
+        "checkout": (
+            "checkout-source",
+            "checkout_source_revision",
+            ["git", "-C", "/opt/h3/ComfyUI", "checkout", "--detach", runtime["revision"]],
+        ),
+    }
+    rebuilt = []
+    for step in plan["steps"]:
+        replacement = replacements.get(step["step_id"])
+        if replacement is None:
+            rebuilt.append(step)
+            continue
+        step_id, action, command = replacement
+        step["step_id"], step["action"], step["command"] = step_id, action, command
+        rebuilt.append(step)
+    rebuilt[3:3] = [
+        {
+            "step_id": "source-bundle-absent",
+            "sequence": 0,
+            "name": "source bundle absent",
+            "action": "inspect",
+            "action_class": "READ_ONLY",
+            "command": ["test", "!", "-e", "/opt/h3/.comfyui.bundle"],
+            "depends_on": ["systemd-ready"],
+            "success_criteria": ["absent"],
+            "rollback_step_ids": [],
+        },
+        {
+            "step_id": "stage-source-bundle",
+            "sequence": 0,
+            "name": "stage source bundle",
+            "action": "stage_source_bundle",
+            "action_class": "PLAN_ALLOWED_WRITE",
+            "command": ["sftp-upload", str(bundle), "/opt/h3/.comfyui.bundle"],
+            "depends_on": ["source-bundle-absent"],
+            "success_criteria": ["exclusive upload"],
+            "rollback_step_ids": [],
+        },
+        {
+            "step_id": "verify-source-bundle",
+            "sequence": 0,
+            "name": "verify source bundle",
+            "action": "inspect",
+            "action_class": "READ_ONLY",
+            "command": ["sha256sum", "/opt/h3/.comfyui.bundle"],
+            "depends_on": ["stage-source-bundle"],
+            "success_criteria": ["sha matches"],
+            "rollback_step_ids": [],
+        },
+    ]
+    checkout_index = next(
+        index for index, step in enumerate(rebuilt) if step["step_id"] == "checkout-source"
+    )
+    rebuilt.insert(
+        checkout_index + 1,
+        {
+            "step_id": "verify-source-tree",
+            "sequence": 0,
+            "name": "verify source tree",
+            "action": "inspect",
+            "action_class": "READ_ONLY",
+            "command": ["git", "-C", "/opt/h3/ComfyUI", "rev-parse", "HEAD^{tree}"],
+            "depends_on": ["checkout-source"],
+            "success_criteria": ["tree matches"],
+            "rollback_step_ids": [],
+        },
+    )
+    for index, step in enumerate(rebuilt, start=1):
+        step["sequence"] = index
+    clone = next(step for step in rebuilt if step["step_id"] == "clone-source")
+    clone["depends_on"] = ["verify-source-bundle"]
+    for step in rebuilt:
+        step["depends_on"] = [
+            {"clone": "clone-source", "checkout": "checkout-source"}.get(item, item)
+            for item in step.get("depends_on", [])
+        ]
+    plan["steps"] = rebuilt
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+
+    class BundleTransport(FakeTransport):
+        def run(self, argv, **kwargs):
+            if tuple(argv) == ("sha256sum", "/opt/h3/.comfyui.bundle"):
+                return CommandResult(tuple(argv), 0, f"{bundle_sha}  .comfyui.bundle\n", "")
+            if tuple(argv) == ("git", "-C", "/opt/h3/ComfyUI", "rev-parse", "HEAD^{tree}"):
+                return CommandResult(tuple(argv), 0, f"{tree}\n", "")
+            if tuple(argv)[-2:] == ("rev-parse", "HEAD"):
+                return CommandResult(tuple(argv), 0, f"{runtime['revision']}\n", "")
+            return super().run(argv, **kwargs)
+
+    transport = BundleTransport()
+    result = execute_plan(
+        plan,
+        transport,
+        request=deployment_request()
+        | {
+            "framework_preference": "comfyui",
+            "target": deployment_request()["target"]
+            | {"install_root": "/opt/h3", "model_root": "/opt/h3/model"},
+            "model": {"id": "minimax-h3", "variant": "both"},
+            "service": plan["service"],
+        },
+        host_profile=observed_host(),
+        _probe_collector=lambda _transport: observed_host(),
+    )
+    assert result.status == "EXECUTED"
+    assert transport.uploads == [(bundle, "/opt/h3/.comfyui.bundle", 300)]
 
 
 def test_ready_hash_validated_and_exact_argv_executed(tmp_path):
@@ -483,11 +625,126 @@ def test_comfyui_plan_only_allows_exact_modelscope_assets_and_isolated_service()
     plan = ready_comfyui_plan()
     validate_executable_plan(plan)
     download = next(step for step in plan["steps"] if step["action"] == "download_model")
-    include = download["command"].index("--include")
-    download["command"][include + 1] = "diffusion_models/minimax_h3_fl2va_bf16.safetensors"
+    download["command"][-1] = "diffusion_models/minimax_h3_fl2va_bf16.safetensors"
     plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
     with pytest.raises(ExecutionBlocked, match="ModelScope"):
         validate_executable_plan(plan)
+
+
+def test_comfyui_master_download_requires_postdownload_integrity_check() -> None:
+    plan = ready_comfyui_plan()
+    download = next(step for step in plan["steps"] if step["action"] == "download_model")
+    revision = download["command"].index("--revision")
+    download["command"][revision + 1] = "master"
+    files = [
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+    ]
+    checksum = {
+        "step_id": "verify-model-assets",
+        "sequence": 90,
+        "name": "verify ModelScope asset integrity",
+        "action": "inspect",
+        "action_class": "READ_ONLY",
+        "command": ["sha256sum", *(f"/opt/h3/model/{item}" for item in files)],
+        "depends_on": ["download"],
+        "success_criteria": ["all SHA-256 values match the observed master manifest"],
+        "rollback_step_ids": [],
+    }
+    link = next(step for step in plan["steps"] if step["action"] == "create_service_config")
+    link["depends_on"].append("verify-model-assets")
+    plan["steps"].append(checksum)
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    validate_executable_plan(plan)
+
+    checksum["depends_on"] = []
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    with pytest.raises(ExecutionBlocked, match="可变 ModelScope master"):
+        validate_executable_plan(plan)
+
+
+def test_comfyui_master_allows_serialized_position_file_downloads() -> None:
+    plan = ready_comfyui_plan()
+    download = next(step for step in plan["steps"] if step["action"] == "download_model")
+    revision = download["command"].index("--revision")
+    download["command"][revision + 1] = "master"
+    files = download["command"][8:]
+    download["command"] = download["command"][:8] + [files[0]]
+    download["step_id"] = "download-1"
+    download["name"] = "download first approved file"
+    downloads = [download]
+    for index, file in enumerate(files[1:], start=2):
+        serial = deepcopy(download)
+        serial["step_id"] = f"download-{index}"
+        serial["sequence"] = 20 + index
+        serial["name"] = f"download approved file {index}"
+        serial["command"] = serial["command"][:8] + [file]
+        serial["depends_on"] = [downloads[-1]["step_id"]]
+        plan["steps"].append(serial)
+        downloads.append(serial)
+    checksum = {
+        "step_id": "verify-model-assets",
+        "sequence": 90,
+        "name": "verify ModelScope asset integrity",
+        "action": "inspect",
+        "action_class": "READ_ONLY",
+        "command": ["sha256sum", *(f"/opt/h3/model/{item}" for item in files)],
+        "depends_on": [item["step_id"] for item in downloads],
+        "success_criteria": ["all SHA-256 values match the observed master manifest"],
+        "rollback_step_ids": [],
+    }
+    link = next(step for step in plan["steps"] if step["action"] == "create_service_config")
+    link["depends_on"].append("verify-model-assets")
+    plan["steps"].append(checksum)
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    validate_executable_plan(plan)
+
+
+def test_comfyui_recovery_reuses_verified_model_assets_before_restart() -> None:
+    plan = ready_comfyui_plan()
+    plan["framework"]["runtime_artifact"]["reuse_verified_model_assets"] = True
+    plan["steps"] = [
+        step
+        for step in plan["steps"]
+        if step["action"] not in {"download_model", "create_service_config"}
+    ]
+    files = [
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "vae/minimax_h3_audio_vae_fp32.safetensors",
+        "vae/minimax_h3_video_vae_fp16.safetensors",
+    ]
+    checksum = {
+        "step_id": "verify-model-assets",
+        "sequence": 20,
+        "name": "verify reused ModelScope assets",
+        "action": "inspect",
+        "action_class": "READ_ONLY",
+        "command": ["sha256sum", *(f"/opt/h3/model/{item}" for item in files)],
+        "depends_on": [],
+        "success_criteria": ["all reused assets match the official manifest"],
+        "rollback_step_ids": [],
+    }
+    model_link = {
+        "step_id": "verify-model-link",
+        "sequence": 21,
+        "name": "verify reused models link",
+        "action": "inspect",
+        "action_class": "READ_ONLY",
+        "command": ["test", "-e", "/opt/h3/models"],
+        "depends_on": ["verify-model-assets"],
+        "success_criteria": ["models link remains available"],
+        "rollback_step_ids": [],
+    }
+    start = next(step for step in plan["steps"] if step["action"] == "start_own_service")
+    start["depends_on"] = ["systemd-ready", "verify-model-assets", "verify-model-link"]
+    plan["steps"].extend([checksum, model_link])
+    plan["review"]["plan_sha256"] = canonical_plan_sha256(plan)
+    validate_executable_plan(plan)
 
 
 def test_comfyui_execution_blocks_without_reviewed_runtime_paths() -> None:
