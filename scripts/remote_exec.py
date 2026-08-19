@@ -953,7 +953,11 @@ def _validate_step_command(
                 "--lowvram",
                 "--disable-auto-launch",
             )
-            if plan["framework"]["name"] != "comfyui" or argv != expected_argv:
+            sage_argv = (*expected_argv[:-1], "--use-sage-attention", expected_argv[-1])
+            if plan["framework"]["name"] != "comfyui" or argv not in {
+                expected_argv,
+                sage_argv,
+            }:
                 raise ExecutionBlocked("ComfyUI 服务必须通过隔离的精确 systemd-run --user 命令启动")
     elif action == "stop_own_service":
         expected = ("systemctl", "--user", "stop", f"{plan['deployment_id']}.service")
